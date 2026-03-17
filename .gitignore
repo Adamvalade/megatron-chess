@@ -1,4 +1,8 @@
 venv/
-*.o
+.venv/
+node_modules/
 __pycache__/
+*.o
+*.so
 *.txt
+.DS_Store
