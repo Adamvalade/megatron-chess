@@ -1,0 +1,25 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Builds & caches
+dist/
+build/
+coverage/
+.tmp/
+.cache/
+.eslintcache
+
+# Env/secrets
+.env
+.env.*.local
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Heroku
+.heroku/
