@@ -14,22 +14,30 @@ print("ENGINE STARTED", flush=True)
 # =========================
 # Debug controls
 # =========================
-DEBUG_CPP = True           # high-level C++ integration logs
+DEBUG_CPP = False          # high-level C++ integration logs
 DEBUG_CPP_MOVES = False    # per-move detailed logs from C++
 
 # =========================
-# Optional C++ move library
+# Optional C++ move library (get_legal_moves from node_chess/move_generator)
+# Build from node_chess/move_generator: make libengine.dylib (macOS) or make libengine.so (Linux)
 # =========================
 _LIB = None
 _lib_load_error = None
+_gen_moves_backend = None  # "cpp" or "py" after gen_moves(); used to confirm which path ran
 
 def _try_load_lib():
     global _LIB, _lib_load_error
+    _engine_dir = os.path.dirname(os.path.abspath(__file__))
+    _move_gen_dir = os.path.join(os.path.dirname(_engine_dir), "move_generator")
+    # Prefer move_generator build so C++ fixes are used without copying the lib
     candidates = [
+        os.path.join(_move_gen_dir, "libengine.dylib"),
+        os.path.join(_move_gen_dir, "libengine.so"),
+        os.path.join(_move_gen_dir, "libengine.dll"),
         "./libengine.dylib", "./libengine.so", "./libengine.dll",
-        os.path.join(os.path.dirname(__file__), "libengine.dylib"),
-        os.path.join(os.path.dirname(__file__), "libengine.so"),
-        os.path.join(os.path.dirname(__file__), "libengine.dll"),
+        os.path.join(_engine_dir, "libengine.dylib"),
+        os.path.join(_engine_dir, "libengine.so"),
+        os.path.join(_engine_dir, "libengine.dll"),
     ]
     for path in candidates:
         try:
@@ -39,7 +47,7 @@ def _try_load_lib():
                 _lib = ctypes.CDLL(path)
                 # Define signatures (return raw pointer so we can free)
                 _lib.get_legal_moves.restype  = ctypes.c_void_p
-                _lib.get_legal_moves.argtypes = [ctypes.c_char_p, ctypes.c_int]
+                _lib.get_legal_moves.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
                 _lib.free_string.argtypes     = [ctypes.c_void_p]
                 _LIB = _lib
                 if DEBUG_CPP:
@@ -51,12 +59,13 @@ def _try_load_lib():
                 print(f"[CPP] Load failed for {path}: {e}", flush=True)
 
 _try_load_lib()
+print("Move generation: C++" if _LIB else "Move generation: Python (C++ lib not loaded)", flush=True)
 
-def _cpp_get_moves_str(board_120_str: str, color_int: int) -> str:
+def _cpp_get_moves_str(board_120_str: str, color_int: int, ep_120: int = 0, castling_4: int = 15) -> str:
     """Call C++ and return the raw move string (semicolon separated), or ''."""
     if _LIB is None:
         return ""
-    ptr = _LIB.get_legal_moves(board_120_str.encode('utf-8'), color_int)
+    ptr = _LIB.get_legal_moves(board_120_str.encode('utf-8'), color_int, ep_120, castling_4)
     if not ptr:
         return ""
     try:
@@ -130,8 +139,10 @@ opt_ranges = dict(QS=(0,300), QS_A=(0,300), EVAL_ROUGHNESS=(0,50))
 Move = namedtuple("Move", "i j prom")
 
 class Position(namedtuple("Position", "board score wc bc ep kp")):
-    # -------- Python generator (unchanged; used for fallback & parity checks) --------
+    # -------- Python move gen (commented out; C++ is default; uncomment body to restore) --------
     def _gen_moves_py(self):
+        return  # disabled – C++ is default
+        # --- original Python implementation below (uncomment to restore) ---
         for i, p in enumerate(self.board):
             if not p.isupper():
                 continue
@@ -161,29 +172,32 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
 
     # -------- C++ generator --------
     def _gen_moves_cpp(self):
-        # Build rows rank1..rank8 from 120-board
+        # C++ expects the board in standard (white's view) 120 layout: rank1 at 91-98, rank8 at 21-28.
+        # When we're black to move, self.board is rotated; convert back to standard for C++.
+        board_std = self.board if not self.board.startswith("\n") else (self.board[::-1].swapcase())
         rows = [
-            self.board[91:99],  # rank 1 (A1..H1)
-            self.board[81:89],  # rank 2
-            self.board[71:79],  # rank 3
-            self.board[61:69],  # rank 4
-            self.board[51:59],  # rank 5
-            self.board[41:49],  # rank 6
-            self.board[31:39],  # rank 7
-            self.board[21:29],  # rank 8 (A8..H8)
+            board_std[91:99],  # rank 1 (A1..H1)
+            board_std[81:89],
+            board_std[71:79],
+            board_std[61:69],
+            board_std[51:59],
+            board_std[41:49],
+            board_std[31:39],
+            board_std[21:29],  # rank 8 (A8..H8)
         ]
         b120 = convert_board(rows)
 
-        # Side-to-move is always UPPERCASE in this representation -> color = 0
-        color = 0
+        # Side-to-move: rotated positions have board starting with '\n' (black to move).
+        color = 1 if self.board.startswith("\n") else 0
 
         if DEBUG_CPP:
             # Small summary (avoid dumping whole board every time)
             up_count = sum(1 for c in self.board if c.isupper())
             lo_count = sum(1 for c in self.board if c.islower())
-            print(f"[CPP] call get_legal_moves(color={color}) | uppercase={up_count}, lowercase={lo_count}", flush=True)
+            print(f"[CPP] call get_legal_moves(color={color}, ep={self.ep}) | uppercase={up_count}, lowercase={lo_count}", flush=True)
 
-        raw = _cpp_get_moves_str(b120, color)
+        castling_4 = (1 if self.wc[1] else 0) | (2 if self.wc[0] else 0) | (4 if self.bc[1] else 0) | (8 if self.bc[0] else 0)
+        raw = _cpp_get_moves_str(b120, color, self.ep, castling_4)
         if DEBUG_CPP:
             if raw:
                 sample = raw.split(';')[:8]
@@ -231,15 +245,19 @@ class Position(namedtuple("Position", "board score wc bc ep kp")):
                 yield Move(i, j, "")
 
     # -------- Unified entry point --------
+    # C++ move generation is the default when the lib is loaded.
     def gen_moves(self):
+        global _gen_moves_backend
         if _LIB is not None:
             try:
+                _gen_moves_backend = "cpp"
                 for mv in self._gen_moves_cpp():
                     yield mv
                 return
             except Exception as e:
                 if DEBUG_CPP:
                     print(f"[CPP] exception in _gen_moves_cpp: {e!r}. Falling back to Python.", flush=True)
+        _gen_moves_backend = "py"
         # Fallback to Python generator (the one that “worked perfectly”)
         for mv in self._gen_moves_py():
             yield mv
@@ -379,7 +397,8 @@ def render(i):
     r, f = divmod(i - A1, 10)
     return chr(f + ord("a")) + str(-r + 1)
 
-# Hand off to the same UCI harness you were using
-hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
-uci.run(sys.modules[__name__], hist[-1])
-sys.exit()
+# Hand off to the same UCI harness you were using (only when run as main)
+if __name__ == "__main__":
+    hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
+    uci.run(sys.modules[__name__], hist[-1])
+    sys.exit()

@@ -111,9 +111,21 @@ static:
       $(SOURCES) *.h *.hpp
 .PHONY: static
 
-libengine.so: interface.o board.o engine.o Piece.o game.o
-	$(CXX) $(CXXFLAGS) -shared -fPIC -o libengine.so interface.o board.o engine.o Piece.o game.o
-.PHONY: libengine.so
+# Shared library for Python engine (get_legal_moves from 120-board string)
+LIBENGINE_OBJS = interface.o board.o Piece.o
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  LIBENGINE_NAME = libengine.dylib
+  LIBENGINE_LDFLAGS = -dynamiclib -fPIC -o $(LIBENGINE_NAME)
+else
+  LIBENGINE_NAME = libengine.so
+  LIBENGINE_LDFLAGS = -shared -fPIC -o $(LIBENGINE_NAME)
+endif
+
+$(LIBENGINE_NAME): $(LIBENGINE_OBJS)
+	$(CXX) $(CXXFLAGS) $(LIBENGINE_LDFLAGS) $(LIBENGINE_OBJS)
+	@echo "Built $(LIBENGINE_NAME) for Python engine integration."
+.PHONY: libengine.so libengine.dylib
 
 # name of the tarballs created for submission
 FULL_SUBMITFILE = fullsubmit.tar.gz

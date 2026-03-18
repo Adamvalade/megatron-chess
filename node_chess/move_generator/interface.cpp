@@ -17,6 +17,12 @@ int toIndex(int rank, int file) {
     return 10 * (9 - rank) + (1 + file);
 }
 
+// When black to move, Python uses rotated board: square at standard index s is at 119-s.
+// So output 119 - toIndex(rank, file) so the move indices match position.board.
+static int toIndexRotated(int rank, int file) {
+    return 119 - toIndex(rank, file);
+}
+
 
 bool fromIndex(int sfIndex, int &outRank, int &outFile)
 {
@@ -31,20 +37,22 @@ bool fromIndex(int sfIndex, int &outRank, int &outFile)
     return true;
 }
 
-void loadBoard(Board & board, const char* b)
+void loadBoard(Board & board, const char* b, int /* sideToMove */)
 {
+    // Python always sends standard (white's view) 120 layout: b[i] = piece at standard square i.
     for (int i = 0; i < 120; i++) {
         char pc = b[i];
         if (pc == '.' || pc == ' ' || pc == '\n' || pc == '\r' || pc == '\t') {
-            continue; 
+            continue;
         }
-        if (pc == '\0') break; 
+        if (pc == '\0') break;
 
         int rank, file;
         if (!fromIndex(i, rank, file)) {
             continue;
         }
 
+        // Standard layout: white = uppercase, black = lowercase.
         bool isWhite = (std::isupper(pc) != 0);
         char base = (char)std::toupper(pc);
 
@@ -65,6 +73,10 @@ void loadBoard(Board & board, const char* b)
         }
     }
 
+    board.white_pawns = board.white_knights = board.white_bishops = board.white_rooks =
+    board.white_queens = board.white_kings = 0ULL;
+    board.black_pawns = board.black_knights = board.black_bishops = board.black_rooks =
+    board.black_queens = board.black_kings = 0ULL;
     board.all_white_pieces = 0ULL;
     board.all_black_pieces = 0ULL;
     board.all_pieces       = 0ULL;
@@ -108,13 +120,28 @@ void loadBoard(Board & board, const char* b)
 
 
 
-const char * get_legal_moves(const char* sunfishBoard, int colorInt)
+const char * get_legal_moves(const char* sunfishBoard, int colorInt, int ep_120, int castling_4)
 {
     Board board;
-    clearBoard(board);          
-    loadBoard(board, sunfishBoard); 
-
+    clearBoard(board);
     Color sideToMove = (colorInt == 0) ? Color::WHITE : Color::BLACK;
+    loadBoard(board, sunfishBoard, colorInt);
+
+    board.set_castling_mask(static_cast<uint16_t>((castling_4 >= 0 && castling_4 <= 15) ? castling_4 : 0x0F));
+
+    if (ep_120 > 0) {
+        int rank, file;
+        // When black to move, Python sends ep in rotated index space (119 - standard).
+        int ep_standard = (colorInt == 1) ? (119 - ep_120) : ep_120;
+        if (fromIndex(ep_standard, rank, file)) {
+            int sq = rank * 8 + file;
+            board.set_en_passant(sq);
+        } else {
+            board.set_en_passant(64);
+        }
+    } else {
+        board.set_en_passant(64);
+    }
 
     if (sideToMove == Color::WHITE) {
         board.set_turn_index(0);
@@ -126,11 +153,10 @@ const char * get_legal_moves(const char* sunfishBoard, int colorInt)
 
     std::vector<Move> moves = board.generate_all_moves(sideToMove);
     std::ostringstream oss;
-
     for (size_t m = 0; m < moves.size(); m++) {
         const Move &mv = moves[m];
-        int i = toIndex(mv.start_rank, mv.start_file);
-        int j = toIndex(mv.end_rank,   mv.end_file);
+        int i = (colorInt == 0) ? toIndex(mv.start_rank, mv.start_file) : toIndexRotated(mv.start_rank, mv.start_file);
+        int j = (colorInt == 0) ? toIndex(mv.end_rank,   mv.end_file)   : toIndexRotated(mv.end_rank,   mv.end_file);
         std::string prom;
 
         oss << i << "," << j << "," << prom;

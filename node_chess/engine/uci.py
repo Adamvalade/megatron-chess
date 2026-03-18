@@ -51,7 +51,8 @@ def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False
         print("info", " ".join(f"{k} {v}" for k, v in fields.items()))
 
         if depth > 1:
-            if elapsed > max_movetime * 2 / 3:
+            # if elapsed > max_movetime * 2 / 3:
+            if max_movetime and elapsed > max_movetime * 0.92:
                 break
             if stop_event.is_set():
                 break
@@ -198,7 +199,8 @@ def run(sunfish_module, startpos):
 
                 elif args[0] == "go":
                     think = 10**6
-                    max_depth = 100
+                    #max_depth = 100
+                    max_depth = 200  # higher default now that C++ move gen is faster
                     loop = go_loop
 
                     if args[1:] == [] or args[1] == "infinite":

@@ -171,12 +171,14 @@ function callEngineAndMove() {
 }
 
 
-function onDragStart(piece) {
+function onDragStart(source, piece) {
   if (window.game.game_over()) return false;
   if (window.isThinking) return false;
-
-  if ((window.game.turn() === 'w' && piece.search(/^b/) !== -1) ||
-      (window.game.turn() === 'b' && piece.search(/^w/) !== -1)) {
+  // chessboard.js calls onDragStart(source, piece, position, orientation)
+  // Only allow dragging the side that is to move (piece is e.g. 'wK' or 'bP')
+  if (!piece || (typeof piece !== 'string')) return false;
+  if ((window.game.turn() === 'w' && piece.indexOf('b') === 0) ||
+      (window.game.turn() === 'b' && piece.indexOf('w') === 0)) {
     return false;
   }
 }

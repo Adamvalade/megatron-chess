@@ -6,8 +6,8 @@ extern "C" {
 #endif
 
 // Opaque native types
-typedef struct Board Board;
-typedef struct Piece Piece;
+typedef class Board Board;
+typedef class Piece Piece;
 
 // Plain-POD move for C/Python boundary (must match your Move fields order)
 typedef struct {
@@ -18,7 +18,7 @@ typedef struct {
 } MoveC;
 
 // Lifetime
-Board* board_new();
+Board * board_new();
 void   board_delete(Board*);
 
 // Optional helpers (call if you need them)
@@ -32,8 +32,8 @@ size_t board_generate_all_moves(Board*, int color, MoveC** out_moves);
 void   board_free_moves(MoveC* arr);
 
 // Make/undo with opaque captured-piece handle:
-Piece* board_make_move(Board*, const MoveC* m);               // returns captured piece handle (or NULL)
-void   board_undo_move(Board*, const MoveC* m, Piece* handle); // consumes & deletes handle
+Piece * board_make_move(Board *, const MoveC * m);               // returns captured piece handle (or NULL)
+void   board_undo_move(Board *, const MoveC * m, Piece * handle); // consumes & deletes handle
 
 #ifdef __cplusplus
 }

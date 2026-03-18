@@ -76,7 +76,7 @@ struct BoardStateHasher {
 
 class Board {
 
-    friend void loadBoard(Board &board, const char* b);
+    friend void loadBoard(Board &board, const char* b, int sideToMove);
     friend void clearBoard(Board & board);
     friend int toIndex(int rank, int file);
     friend bool fromIndex(int sfIndex, int &outRank, int &outFile);
@@ -123,7 +123,11 @@ public:
     bool is_within_bounds(int rank, int file);
 
     uint16_t getCastlingRights();
+    /** Mask castling rights from game state (4 bits: K=1 Q=2 k=4 q=8). Use 0x0F to allow all inferred. */
+    void set_castling_mask(uint16_t mask);
     uint8_t getEnPassantSquare() const ;
+    /** Set en passant target square (0-63) for loaded positions; use 64 or negative for none. */
+    void set_en_passant(int square_0_63);
 
     vector<Move> generate_all_moves(Color color);
     vector<Move> generate_legal_moves(Color color);
@@ -179,6 +183,8 @@ private:
     uint64_t one_square(int sq);
     int shift_square(int sq, int dr, int dc);
     void init_precomputed_attacks();
+    /** Occupancy bitboard built from 2D board (avoids bitboard sync issues). */
+    uint64_t get_occupancy_from_board() const;
 
     void filter_moves_for_legality(const vector<Move> & raw_moves, Color color, vector<Move> & legal_moves);
     void detect_pins(Color us, int king_sq);
@@ -188,6 +194,7 @@ private:
     bool is_pinned_piece(int sq) const;
 
     int en_passant_square;
+    uint16_t castling_mask_;  // mask from game state (KQkq = 0b0001, 0b0010, 0b0100, 0b1000)
 
     vector<vector<Piece>> board;
     unordered_set<BoardState, BoardStateHasher> visited_states;
