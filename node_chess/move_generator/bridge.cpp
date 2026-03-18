@@ -36,7 +36,8 @@ void board_generate_startpos(Board* b) {
 }
 
 void board_set_turn_index(Board* b, int ti) {
-    if (b) b->set_turn_index(ti);
+    size_t size_t_ti = static_cast<size_t>(ti);
+    if (b) b->set_turn_index(size_t_ti);
 }
 
 void board_compute_attack_masks(Board* b) {

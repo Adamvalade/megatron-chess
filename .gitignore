@@ -4,5 +4,8 @@ node_modules/
 __pycache__/
 *.o
 *.so
+*.dylib
+*.dll
 *.txt
+node_chess/move_generator/test_move_gen
 .DS_Store
