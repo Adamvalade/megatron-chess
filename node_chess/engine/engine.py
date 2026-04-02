@@ -35,34 +35,53 @@ def _try_load_lib():
         os.path.join(_engine_dir, "libengine.so"),
         os.path.join(_engine_dir, "libengine.dll"),
     ]
+
+    def _bind_moves(lib):
+        lib.get_legal_moves.restype = ctypes.c_void_p
+        lib.get_legal_moves.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        lib.free_string.argtypes = [ctypes.c_void_p]
+
+    def _bind_search(lib):
+        lib.search_position.restype = ctypes.c_void_p
+        lib.search_position.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+
+    fallback = None  # (path, lib) move-gen only
     for path in candidates:
+        if not os.path.exists(path):
+            continue
         try:
-            if os.path.exists(path):
+            if DEBUG_CPP:
+                print(f"[CPP] Trying to load: {path}", flush=True)
+            lib = ctypes.CDLL(path)
+            _bind_moves(lib)
+            if getattr(lib, "search_position", None) is not None:
+                _bind_search(lib)
+                _LIB = lib
                 if DEBUG_CPP:
-                    print(f"[CPP] Trying to load: {path}", flush=True)
-                _lib = ctypes.CDLL(path)
-                # Define signatures (return raw pointer so we can free)
-                _lib.get_legal_moves.restype  = ctypes.c_void_p
-                _lib.get_legal_moves.argtypes = [ctypes.c_char_p, ctypes.c_int]
-                _lib.free_string.argtypes     = [ctypes.c_void_p]
-                if hasattr(_lib, "search_position"):
-                    _lib.search_position.restype = ctypes.c_void_p
-                    _lib.search_position.argtypes = [
-                        ctypes.c_char_p,
-                        ctypes.c_int,
-                        ctypes.c_int,
-                        ctypes.c_char_p,
-                        ctypes.c_int,
-                        ctypes.c_int,
-                    ]
-                _LIB = _lib
-                if DEBUG_CPP:
-                    print(f"[CPP] Loaded OK: {path}", flush=True)
+                    print(f"[CPP] Loaded OK (move gen + search): {path}", flush=True)
                 return
+            if fallback is None:
+                fallback = (path, lib)
         except OSError as e:
             _lib_load_error = e
             if DEBUG_CPP:
                 print(f"[CPP] Load failed for {path}: {e}", flush=True)
+
+    if fallback is not None:
+        path, lib = fallback
+        _LIB = lib
+        if DEBUG_CPP:
+            print(
+                f"[CPP] Loaded OK (move gen only; rebuild move_generator for C++ search): {path}",
+                flush=True,
+            )
 
 _try_load_lib()
 

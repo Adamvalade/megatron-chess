@@ -5,5 +5,7 @@ __pycache__/
 *.dylib
 *.dll
 libengine.so
+node_chess/engine/libengine.dylib
+node_chess/engine/libengine.so
 node_chess/move_generator/verify_search
 node_chess/move_generator/*.dSYM/
