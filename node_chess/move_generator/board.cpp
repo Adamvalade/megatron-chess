@@ -1430,6 +1430,14 @@ uint8_t Board::getEnPassantSquare() const {
     return 0xFF;
 }
 
+void Board::reset_en_passant_stack(int sq) {
+    while (!en_passant_stack.empty()) {
+        en_passant_stack.pop();
+    }
+    en_passant_square = (sq >= 0 && sq < 64) ? sq : 64;
+    en_passant_stack.push(en_passant_square);
+}
+
 
 static const int KING_RAYS[8] = {8, -8, 1, -1, 9, 7, -7, -9};
 

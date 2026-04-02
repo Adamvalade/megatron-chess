@@ -26,7 +26,89 @@ def parse_move(move_str, white_pov):
     return sunfish.Move(i, j, prom)
 
 
-def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False):
+WHITE, BLACK = range(2)
+
+
+def get_color(pos):
+    """Side to move in internal board orientation (newline prefix => Black)."""
+    return BLACK if pos.board.startswith("\n") else WHITE
+
+
+def pos_to_fen(pos):
+    """Piece-placement field of FEN from a sunfish Position (standard orientation)."""
+    is_black = pos.board.startswith("\n")
+    board_std = pos.board[::-1].swapcase() if is_black else pos.board
+    rows = []
+    for rank in range(7, -1, -1):
+        start = 10 * (9 - rank) + 1
+        row_str = board_std[start : start + 8]
+        fen_row = ""
+        empty = 0
+        for ch in row_str:
+            if ch == ".":
+                empty += 1
+            else:
+                if empty > 0:
+                    fen_row += str(empty)
+                    empty = 0
+                fen_row += ch
+        if empty > 0:
+            fen_row += str(empty)
+        rows.append(fen_row)
+    return "/".join(rows)
+
+
+def _ep_120_to_sq64(ep):
+    if not ep:
+        return -1
+    row = ep // 10
+    col = ep % 10
+    if row < 2 or row > 9 or col < 1 or col > 8:
+        return -1
+    rank = 9 - row
+    file = col - 1
+    return rank * 8 + file
+
+
+def go_loop_cpp(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False):
+    import time as _time
+
+    start = _time.time()
+    max_time_ms = int(max_movetime * 1000) if max_movetime else 0
+    max_d = max_depth if max_depth > 0 else 100
+
+    pos = hist[-1]
+    fen = pos_to_fen(pos)
+    color_int = 0 if len(hist) % 2 == 1 else 1
+
+    real = pos
+    if get_color(pos) == BLACK:
+        real = sunfish.Position(
+            pos.board[::-1].swapcase(),
+            -pos.score,
+            pos.bc,
+            pos.wc,
+            119 - pos.ep if pos.ep else 0,
+            119 - pos.kp if pos.kp else 0,
+        )
+
+    ep_sq = _ep_120_to_sq64(real.ep)
+
+    result = sunfish.cpp_search(fen, color_int, ep_sq, "", max_d, max_time_ms)
+    elapsed = _time.time() - start
+    if result:
+        uci_m, score, depth, nodes = result
+        nps = round(nodes / elapsed) if elapsed > 0 else 0
+        print(
+            "info",
+            f"depth {depth} score cp {score} nodes {nodes} nps {nps} time {round(1000 * elapsed)}",
+        )
+        print("bestmove", uci_m)
+    else:
+        go_loop_py(searcher, hist, stop_event, max_movetime, max_depth, debug)
+
+
+def go_loop_py(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False):
     if debug:
         print(f"Going movetime={max_movetime}, depth={max_depth}")
 
@@ -40,7 +122,7 @@ def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False
             "depth": depth,
             "time": round(1000 * elapsed),
             "nodes": searcher.nodes,
-            "nps": round(searcher.nodes / elapsed),
+            "nps": round(searcher.nodes / elapsed) if elapsed > 0 else 0,
         }
         if score >= gamma:
             fields["score cp"] = f"{score} lowerbound"
@@ -58,6 +140,14 @@ def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False
 
     my_pv = pv(searcher, hist[-1], include_scores=False)
     print("bestmove", my_pv[0] if my_pv else "(none)")
+
+
+def go_loop(searcher, hist, stop_event, max_movetime=0, max_depth=0, debug=False):
+    _lib = getattr(sunfish, "_LIB", None)
+    if _lib is not None and hasattr(_lib, "search_position"):
+        go_loop_cpp(searcher, hist, stop_event, max_movetime, max_depth, debug)
+    else:
+        go_loop_py(searcher, hist, stop_event, max_movetime, max_depth, debug)
 
 
 def mate_loop(
@@ -251,8 +341,6 @@ def run(sunfish_module, startpos):
                     go_future.result()
                 break
 
-WHITE, BLACK = range(2)
-
 
 def from_fen(board, color, castling, enpas, _hclock, _fclock):
     board = re.sub(r"\d", (lambda m: "." * int(m.group(0))), board)
@@ -271,11 +359,6 @@ def from_fen(board, color, castling, enpas, _hclock, _fclock):
         score -= sum(sunfish.pst[c.upper()][119-i] for i, c in enumerate(board) if c.islower())
         pos = sunfish.Position(board, score, wc, bc, ep, 0)
     return pos if color == 'w' else pos.rotate()
-
-
-def get_color(pos):
-    """A slightly hacky way to to get the color from a sunfish position"""
-    return BLACK if pos.board.startswith("\n") else WHITE
 
 
 def can_kill_king(pos):
