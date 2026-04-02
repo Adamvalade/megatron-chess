@@ -2,3 +2,8 @@ venv/
 *.o
 __pycache__/
 *.txt
+*.dylib
+*.dll
+libengine.so
+node_chess/move_generator/verify_search
+node_chess/move_generator/*.dSYM/

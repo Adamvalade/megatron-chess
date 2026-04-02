@@ -25,11 +25,15 @@ _lib_load_error = None
 
 def _try_load_lib():
     global _LIB, _lib_load_error
+    _engine_dir = os.path.dirname(os.path.abspath(__file__))
+    _move_gen_dir = os.path.join(os.path.dirname(_engine_dir), "move_generator")
     candidates = [
+        os.path.join(_move_gen_dir, "libengine.dylib"),
+        os.path.join(_move_gen_dir, "libengine.so"),
         "./libengine.dylib", "./libengine.so", "./libengine.dll",
-        os.path.join(os.path.dirname(__file__), "libengine.dylib"),
-        os.path.join(os.path.dirname(__file__), "libengine.so"),
-        os.path.join(os.path.dirname(__file__), "libengine.dll"),
+        os.path.join(_engine_dir, "libengine.dylib"),
+        os.path.join(_engine_dir, "libengine.so"),
+        os.path.join(_engine_dir, "libengine.dll"),
     ]
     for path in candidates:
         try:
@@ -41,6 +45,16 @@ def _try_load_lib():
                 _lib.get_legal_moves.restype  = ctypes.c_void_p
                 _lib.get_legal_moves.argtypes = [ctypes.c_char_p, ctypes.c_int]
                 _lib.free_string.argtypes     = [ctypes.c_void_p]
+                if hasattr(_lib, "search_position"):
+                    _lib.search_position.restype = ctypes.c_void_p
+                    _lib.search_position.argtypes = [
+                        ctypes.c_char_p,
+                        ctypes.c_int,
+                        ctypes.c_int,
+                        ctypes.c_char_p,
+                        ctypes.c_int,
+                        ctypes.c_int,
+                    ]
                 _LIB = _lib
                 if DEBUG_CPP:
                     print(f"[CPP] Loaded OK: {path}", flush=True)
@@ -51,6 +65,38 @@ def _try_load_lib():
                 print(f"[CPP] Load failed for {path}: {e}", flush=True)
 
 _try_load_lib()
+
+
+def cpp_search(
+    fen_pieces: str,
+    color_int: int,
+    ep_sq: int = -1,
+    moves_uci: str = "",
+    max_depth: int = 0,
+    max_time_ms: int = 0,
+):
+    """Call C++ search if available. Returns (uci_move, score, depth, nodes) or None."""
+    if _LIB is None or not hasattr(_LIB, "search_position"):
+        return None
+    ptr = _LIB.search_position(
+        fen_pieces.encode("utf-8"),
+        color_int,
+        ep_sq,
+        moves_uci.encode("utf-8"),
+        max_depth,
+        max_time_ms,
+    )
+    if not ptr:
+        return None
+    try:
+        raw = ctypes.cast(ptr, ctypes.c_char_p).value.decode("utf-8")
+    finally:
+        _LIB.free_string(ctypes.c_void_p(ptr))
+    parts = raw.split()
+    if len(parts) < 4:
+        return None
+    return parts[0], int(parts[1]), int(parts[2]), int(parts[3])
+
 
 def _cpp_get_moves_str(board_120_str: str, color_int: int) -> str:
     """Call C++ and return the raw move string (semicolon separated), or ''."""
@@ -379,7 +425,7 @@ def render(i):
     r, f = divmod(i - A1, 10)
     return chr(f + ord("a")) + str(-r + 1)
 
-# Hand off to the same UCI harness you were using
-hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
-uci.run(sys.modules[__name__], hist[-1])
-sys.exit()
+if __name__ == "__main__":
+    hist = [Position(initial, 0, (True, True), (True, True), 0, 0)]
+    uci.run(sys.modules[__name__], hist[-1])
+    sys.exit()

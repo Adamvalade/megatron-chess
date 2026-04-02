@@ -80,6 +80,8 @@ class Board {
     friend void clearBoard(Board & board);
     friend int toIndex(int rank, int file);
     friend bool fromIndex(int sfIndex, int &outRank, int &outFile);
+    /** Rebuilds piece + aggregate bitboards from the 8x8 array (search.cpp). */
+    friend void search_rebuild_bitboards_from_2d(Board& b);
 
 public:
 
@@ -134,6 +136,9 @@ public:
 
     size_t get_turn_index();
     void set_turn_index(size_t index);
+
+    /** Reset en passant state before a search (sq 0–63, or <0 / >=64 for none). */
+    void reset_en_passant_stack(int sq);
 
     const Piece & getPiece(int square);
     const Piece & getPiece(int rank, int file);

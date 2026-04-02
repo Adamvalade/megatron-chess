@@ -111,9 +111,30 @@ static:
       $(SOURCES) *.h *.hpp
 .PHONY: static
 
-libengine.so: interface.o board.o engine.o Piece.o game.o
-	$(CXX) $(CXXFLAGS) -shared -fPIC -o libengine.so interface.o board.o engine.o Piece.o game.o
+# Shared library for Python (macOS: .dylib, Linux: .so)
+LIBENGINE_OBJS = interface.o board.o Piece.o search.o
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+LIBENGINE_NAME = libengine.dylib
+LIBENGINE_LINK = -dynamiclib
+else
+LIBENGINE_NAME = libengine.so
+LIBENGINE_LINK = -shared
+endif
+
+$(LIBENGINE_NAME): $(LIBENGINE_OBJS)
+	$(CXX) $(CXXFLAGS) -fPIC $(LIBENGINE_LINK) -o $(LIBENGINE_NAME) $(LIBENGINE_OBJS)
+	@echo Built $(LIBENGINE_NAME) for Python engine integration.
+
+libengine: $(LIBENGINE_NAME)
+.PHONY: libengine libengine.dylib
+
+# Linux already builds libengine.so; on macOS also copy .so name for scripts that expect it
+ifeq ($(UNAME_S),Darwin)
+libengine.so: $(LIBENGINE_NAME)
+	cp -f $(LIBENGINE_NAME) libengine.so
 .PHONY: libengine.so
+endif
 
 # name of the tarballs created for submission
 FULL_SUBMITFILE = fullsubmit.tar.gz
@@ -175,9 +196,15 @@ alltests: $(TESTS)
 clean:
 	rm -Rf *.dSYM
 	rm -f $(OBJECTS) $(EXECUTABLE) $(EXECUTABLE)_debug
-	rm -f $(EXECUTABLE)_valgrind $(EXECUTABLE)_profile $(TESTS) perf.data* \
+	rm -f $(EXECUTABLE)_valgrind $(EXECUTABLE)_profile $(TESTS) verify_search perf.data* \
+      libengine.dylib libengine.so \
       $(PARTIAL_SUBMITFILE) $(FULL_SUBMITFILE) $(UNGRADED_SUBMITFILE)
 .PHONY: clean
+
+# C++ search smoke test (not named test*.cpp — avoids generic test driver rule)
+verify_search: board.o Piece.o search.o verify_search.cpp
+	$(CXX) $(CXXFLAGS) -g3 board.o Piece.o search.o verify_search.cpp -o verify_search
+.PHONY: verify_search
 
 # Files that should not be included in a tarball
 EXCLUDE_FILES = getopt.\?

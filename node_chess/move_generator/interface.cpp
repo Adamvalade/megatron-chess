@@ -3,8 +3,65 @@
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include "board.h" 
 #include "interface.h"
+#include "search.h"
+
+namespace {
+
+void apply_fen_placement(Board& board, const std::string& fen) {
+    clearBoard(board);
+    char grid[8][8];
+    std::memset(grid, '.', sizeof(grid));
+    int rank = 7, file = 0;
+    for (size_t i = 0; i < fen.size() && fen[i] != ' '; i++) {
+        char c = fen[i];
+        if (c == '/') {
+            rank--;
+            file = 0;
+            continue;
+        }
+        if (c >= '1' && c <= '8') {
+            file += (c - '0');
+            continue;
+        }
+        if (rank >= 0 && rank < 8 && file >= 0 && file < 8) {
+            grid[rank][file] = c;
+        }
+        file++;
+    }
+    char b120[121];
+    std::memset(b120, ' ', 120);
+    b120[120] = '\0';
+    for (int r = 0; r < 8; r++) {
+        for (int f = 0; f < 8; f++) {
+            int idx = 10 * (9 - r) + (1 + f);
+            b120[idx] = grid[r][f];
+        }
+    }
+    loadBoard(board, b120);
+}
+
+bool parse_uci_move(const std::string& s, Move& m) {
+    if (s.size() < 4) return false;
+    m.start_file = s[0] - 'a';
+    m.start_rank = s[1] - '1';
+    m.end_file = s[2] - 'a';
+    m.end_rank = s[3] - '1';
+    return true;
+}
+
+std::string move_to_uci(const Move& m) {
+    std::string out;
+    out += static_cast<char>('a' + m.start_file);
+    out += static_cast<char>('1' + m.start_rank);
+    out += static_cast<char>('a' + m.end_file);
+    out += static_cast<char>('1' + m.end_rank);
+    return out;
+}
+
+} // namespace
 
 
 
@@ -138,6 +195,72 @@ const char * get_legal_moves(const char* sunfishBoard, int colorInt)
             oss << ";";
         }
     }
+
+    std::string result = oss.str();
+    char* ret = new char[result.size() + 1];
+    std::copy(result.begin(), result.end(), ret);
+    ret[result.size()] = '\0';
+    return ret;
+}
+
+const char* search_position(const char* fen_pieces, int colorInt, int ep_sq,
+                            const char* moves_uci, int max_depth, int max_time_ms) {
+    Board board;
+    std::string fen = fen_pieces ? fen_pieces : "startpos";
+    if (fen == "startpos") {
+        board.clear();
+        board.generate_board();
+    } else {
+        apply_fen_placement(board, fen);
+    }
+
+    int n_moves = 0;
+    if (moves_uci && moves_uci[0] != '\0') {
+        std::istringstream ms(moves_uci);
+        std::string tok;
+        while (ms >> tok) {
+            n_moves++;
+        }
+    }
+
+    int init_stm = (n_moves % 2 == 0) ? colorInt : (1 - colorInt);
+    Color cur = (init_stm == 0) ? Color::WHITE : Color::BLACK;
+
+    if (moves_uci && moves_uci[0] != '\0') {
+        std::istringstream ms2(moves_uci);
+        std::string tok;
+        while (ms2 >> tok) {
+            Move m;
+            if (!parse_uci_move(tok, m)) {
+                continue;
+            }
+            board.compute_attack_masks();
+            board.make_move(m);
+            search_rebuild_bitboards_from_2d(board);
+            cur = (cur == Color::WHITE) ? Color::BLACK : Color::WHITE;
+        }
+    }
+
+    board.set_turn_index(cur == Color::WHITE ? 0 : 1);
+    board.reset_en_passant_stack(ep_sq);
+    search_rebuild_bitboards_from_2d(board);
+    board.compute_attack_masks();
+
+    Searcher searcher;
+    int out_score = 0, out_depth = 0;
+    uint64_t out_nodes = 0;
+    Move best = searcher.search(board, cur,
+                                max_depth > 0 ? max_depth : 100,
+                                max_time_ms > 0 ? max_time_ms : 0,
+                                out_score, out_depth, out_nodes);
+
+    std::ostringstream oss;
+    if (best.start_rank >= 0 && best.start_file >= 0) {
+        oss << move_to_uci(best);
+    } else {
+        oss << "0000";
+    }
+    oss << " " << out_score << " " << out_depth << " " << out_nodes;
 
     std::string result = oss.str();
     char* ret = new char[result.size() + 1];
