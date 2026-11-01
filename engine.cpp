@@ -1,30 +1,12 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
-#include "game.h"
 #include "utilities.h"
 #include "engine.h"
 #include "getopt.h"
 #include "tests.h"
-#include "interface.h"
 
 using namespace std;
-
-class Error {
-
-    public:
-
-    Error(const string & msg_val) : msg(msg_val) {}
-    Error() : msg("ERROR\n") {}
-
-    void what() const { 
-        cerr << msg;
-    }
-
-    private:
-
-    const string msg;
-};
 
 
 Options getOptions(int argc, char ** argv) {
@@ -89,16 +71,16 @@ int main(int argc, char ** argv) {
 
         else {
             // run program
-            Game * game = new Game;
+            // Game * game = new Game;
             char choice;
             cout << "Do you want the white side to be played by the engine? (y/n): \n";
             cin >> choice;
-            game->whiteIsEngine = (choice == 'y' || choice == 'Y');
+            // game->whiteIsEngine = (choice == 'y' || choice == 'Y');
             cout << "Do you want the black side to be played by the engine? (y/n): \n";
             cin >> choice;
-            game->blackIsEngine = (choice == 'y' || choice == 'Y');
-            game->go();
-            delete game;
+            // game->blackIsEngine = (choice == 'y' || choice == 'Y');
+            // game->go();
+            // delete game;
         }
     }
     catch (const Error & error) {

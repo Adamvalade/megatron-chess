@@ -23,6 +23,17 @@ void Board::clear() {
     board.clear();
     board.resize(8, vector<Piece>(8, Piece(PieceType::NONE, Color::NONE)));
     turn_index = 0;
+
+    // The stacks are per-position history; a cleared board has none.
+    // Without this, set_from_fen() inherits stale entries (e.g. an
+    // en-passant target from a previously loaded position).
+    en_passant_stack = stack<int>();
+    promotion_stack = stack<int>();
+    castling_stack = stack<bool>();
+    castling_rights_stack = stack<uint16_t>();
+
+    castling_rights = 0;
+    en_passant_square = 64;
 }
     
 
@@ -31,6 +42,7 @@ void Board::generate_board() {
     board.resize(8, vector<Piece>(8, Piece(PieceType::NONE, Color::NONE)));
 
     // Initialize the bitboards for each piece type
+    // H8 is MSB and A1 is LSB
     white_pawns = 0x000000000000FF00;
     black_pawns = 0x00FF000000000000;
     white_knights = 0x0000000000000042;
@@ -61,10 +73,21 @@ void Board::generate_board() {
     board[7][2] = board[7][5] = Piece(PieceType::BISHOP, Color::BLACK);
     board[7][3] = Piece(PieceType::QUEEN, Color::BLACK);
     board[7][4] = Piece(PieceType::KING, Color::BLACK);
-    
+
     all_white_pieces = white_pawns | white_knights | white_rooks | white_bishops | white_queens | white_kings;
     all_black_pieces = black_pawns | black_knights | black_rooks | black_bishops | black_queens | black_kings;
     all_pieces = all_white_pieces | all_black_pieces;
+
+    // Game state for the starting position. This was previously never
+    // set here: castling_rights stayed 0 (no castling was ever legal
+    // from a default-constructed board) and en_passant_square had no
+    // initializer at all, so to_fen()/getEnPassantSquare() read
+    // indeterminate memory until the first double push.
+    castling_rights = WHITE_KINGSIDE | WHITE_QUEENSIDE |
+                      BLACK_KINGSIDE | BLACK_QUEENSIDE;
+    en_passant_square = 64;
+    turn_index = 0;
+    white_attacks = black_attacks = pinned_pieces = 0ULL;
 }
 
 
@@ -137,12 +160,58 @@ void Board::make_move(const Move & move) {
     Piece piece = board[static_cast<size_t>(move.start_rank)][static_cast<size_t>(move.start_file)];
     Piece captured_piece = board[static_cast<size_t>(move.end_rank)][static_cast<size_t>(move.end_file)];
 
+    // Save castling rights so undo_move() can restore them. Every
+    // make_move() pushes exactly once; every undo_move() pops once.
+    castling_rights_stack.push(castling_rights);
+
     bool castled = check_castling(piece, move);
 
-    if (castled)
+    if (castled) {
+        // Castling moves the king: both of that color's rights are spent.
+        castling_rights &= static_cast<uint16_t>(
+            piece.getColor() == Color::WHITE
+                ? ~(WHITE_KINGSIDE | WHITE_QUEENSIDE)
+                : ~(BLACK_KINGSIDE | BLACK_QUEENSIDE));
+        // Castling is not a double pawn push, so it clears the en-passant
+        // square. Push the cleared value so that every make_move() pushes
+        // exactly one entry and undo_move() can restore the previous one.
+        // Previously the stack (and member) kept the opponent's EP target
+        // alive, allowing a phantom en-passant capture after castling.
+        en_passant_square = 64;
+        en_passant_stack.push(en_passant_square);
         return;
+    }
 
-    castling_stack.push(false);  
+    castling_stack.push(false);
+
+    // Update castling rights: a king move spends both of its color's
+    // rights; a rook move from, or a rook capture on, a corner square
+    // spends that corner's right. Previously rights were never revoked,
+    // so castling stayed "legal" after its rook was captured -- and
+    // executing it deleted whatever piece sat on the corner square.
+    {
+        auto revoke_corner = [this](int square) {
+            switch (square) {
+                case 0:  castling_rights &= static_cast<uint16_t>(~WHITE_QUEENSIDE); break; // a1
+                case 7:  castling_rights &= static_cast<uint16_t>(~WHITE_KINGSIDE);  break; // h1
+                case 56: castling_rights &= static_cast<uint16_t>(~BLACK_QUEENSIDE); break; // a8
+                case 63: castling_rights &= static_cast<uint16_t>(~BLACK_KINGSIDE);  break; // h8
+                default: break;
+            }
+        };
+        if (piece.getType() == PieceType::KING) {
+            castling_rights &= static_cast<uint16_t>(
+                piece.getColor() == Color::WHITE
+                    ? ~(WHITE_KINGSIDE | WHITE_QUEENSIDE)
+                    : ~(BLACK_KINGSIDE | BLACK_QUEENSIDE));
+        }
+        if (piece.getType() == PieceType::ROOK) {
+            revoke_corner(move.start_rank * 8 + move.start_file);
+        }
+        if (captured_piece.getType() == PieceType::ROOK) {
+            revoke_corner(move.end_rank * 8 + move.end_file);
+        }
+    }
 
     // Update the 2D array
     board[static_cast<size_t>(move.start_rank)][static_cast<size_t>(move.start_file)] = Piece(PieceType::NONE, Color::NONE);
@@ -269,40 +338,43 @@ void Board::make_move(const Move & move) {
 
 
 
-    if (piece.getType() == PieceType::PAWN)  {
-        int endSquareIndex = move.end_rank * 8 + move.end_file;
-        // White promotion: end_rank == 7
-        if (c == Color::WHITE && move.end_rank == 7) {
-            // Update 2D board
-            board[static_cast<size_t>(move.end_rank)][static_cast<size_t>(move.end_file)] = Piece(PieceType::QUEEN, Color::WHITE);
-
-            // Update bitboards
-            white_pawns &= ~end_bit;  // remove pawn from end_bit
-            white_queens |= end_bit;  // add queen to end_bit
-
-            // Push the promotion square onto the stack
-            promotion_stack.push(endSquareIndex);
-
+    if (piece.getType() == PieceType::PAWN &&
+        ((c == Color::WHITE && move.end_rank == 7) ||
+         (c == Color::BLACK && move.end_rank == 0))) {
+        // Promotion: create the piece named by the move. A hand-built
+        // move with promotion == NONE (the historical construction)
+        // still promotes to a queen.
+        PieceType promoted = move.promotion;
+        if (promoted != PieceType::QUEEN && promoted != PieceType::ROOK &&
+            promoted != PieceType::BISHOP && promoted != PieceType::KNIGHT) {
+            promoted = PieceType::QUEEN;
         }
-        // Black promotion: end_rank == 0
-        else if (c == Color::BLACK && move.end_rank == 0) {
-            // Update 2D board
-            board[static_cast<size_t>(move.end_rank)][static_cast<size_t>(move.end_file)] = Piece(PieceType::QUEEN, Color::BLACK);
+        const int endSquareIndex = move.end_rank * 8 + move.end_file;
 
-            // Update bitboards
-            black_pawns &= ~end_bit;  
-            black_queens |= end_bit;  
+        board[static_cast<size_t>(move.end_rank)][static_cast<size_t>(move.end_file)] =
+            Piece(promoted, c);
 
-            // Push the promotion square
-            promotion_stack.push(endSquareIndex);
+        // Bitboards: pawn leaves, promoted piece arrives.
+        if (c == Color::WHITE) white_pawns &= ~end_bit; else black_pawns &= ~end_bit;
+        switch (promoted) {
+            case PieceType::KNIGHT:
+                (c == Color::WHITE ? white_knights : black_knights) |= end_bit;
+                break;
+            case PieceType::BISHOP:
+                (c == Color::WHITE ? white_bishops : black_bishops) |= end_bit;
+                break;
+            case PieceType::ROOK:
+                (c == Color::WHITE ? white_rooks : black_rooks) |= end_bit;
+                break;
+            default: // QUEEN
+                (c == Color::WHITE ? white_queens : black_queens) |= end_bit;
+                break;
         }
-        else {
-            // No promotion
-            promotion_stack.push(64);
-        }
+
+        promotion_stack.push(endSquareIndex);
     }
     else {
-        // The moved piece was not a pawn => definitely no promotion
+        // No promotion on this move
         promotion_stack.push(64);
     }
 
@@ -319,8 +391,11 @@ bool Board::check_castling(Piece & p, const Move & m) {
     // White king: e1->g1 or e1->c1
     if (p.getType() == PieceType::KING && p.getColor() == Color::WHITE && 
         m.start_rank == 0 && m.start_file == 4) {
-        // White kingside
-        if (m.end_rank == 0 && m.end_file == 6) {
+        // White kingside (requires the rook to actually be on h1;
+        // otherwise this would delete whatever sits there)
+        if (m.end_rank == 0 && m.end_file == 6 &&
+            board[0][7].getType() == PieceType::ROOK &&
+            board[0][7].getColor() == Color::WHITE) {
             // Move the king
             board[0][4] = Piece(PieceType::NONE, Color::NONE);
             board[0][6] = Piece(PieceType::KING, Color::WHITE);
@@ -353,8 +428,10 @@ bool Board::check_castling(Piece & p, const Move & m) {
             return true;
         }
 
-        // White queenside
-        if (m.end_rank == 0 && m.end_file == 2) {
+        // White queenside (requires the rook to actually be on a1)
+        if (m.end_rank == 0 && m.end_file == 2 &&
+            board[0][0].getType() == PieceType::ROOK &&
+            board[0][0].getColor() == Color::WHITE) {
             // Move the king
             board[0][4] = Piece(PieceType::NONE, Color::NONE);
             board[0][2] = Piece(PieceType::KING, Color::WHITE);
@@ -390,8 +467,10 @@ bool Board::check_castling(Piece & p, const Move & m) {
     // Black king: e8->g8 or e8->c8
     if (p.getType() == PieceType::KING && p.getColor() == Color::BLACK && 
         m.start_rank == 7 && m.start_file == 4) {
-        // Black kingside
-        if (m.end_rank == 7 && m.end_file == 6)
+        // Black kingside (requires the rook to actually be on h8)
+        if (m.end_rank == 7 && m.end_file == 6 &&
+            board[7][7].getType() == PieceType::ROOK &&
+            board[7][7].getColor() == Color::BLACK)
         {
             // Move the king
             board[7][4] = Piece(PieceType::NONE, Color::NONE);
@@ -424,8 +503,10 @@ bool Board::check_castling(Piece & p, const Move & m) {
             return true;
         }
 
-        // Black queenside
-        if (m.end_rank == 7 && m.end_file == 2)
+        // Black queenside (requires the rook to actually be on a8)
+        if (m.end_rank == 7 && m.end_file == 2 &&
+            board[7][0].getType() == PieceType::ROOK &&
+            board[7][0].getColor() == Color::BLACK)
         {
             // Move the king
             board[7][4] = Piece(PieceType::NONE, Color::NONE);
@@ -472,8 +553,18 @@ void Board::undo_move(const Move & move, const Piece & captured_piece) {
     bool was_castling = castling_stack.top();
     castling_stack.pop();
 
+    // Restore the castling rights that preceded this move (make_move
+    // pushes them for castling and non-castling moves alike).
+    castling_rights = castling_rights_stack.top();
+    castling_rights_stack.pop();
+
     // If it was a castling move, revert king and rook:
     if (was_castling) {
+        // make_move() pushed the cleared en-passant value for castling;
+        // pop it and restore the value that preceded the castle.
+        en_passant_stack.pop();
+        en_passant_square =
+            en_passant_stack.empty() ? 64 : en_passant_stack.top();
 
         // White kingside? e1->g1
         if (move.start_rank == 0 && move.start_file == 4 &&
@@ -696,18 +787,27 @@ void Board::undo_move(const Move & move, const Piece & captured_piece) {
     promotion_stack.pop();
 
     if (promoted_square != 64) {
-        // => That means a pawn was promoted at 'promoted_square'.
-        // We need to revert it to a pawn. The 'moved_piece' is currently the
-        // post-promotion piece (e.g. a queen, if you always promote to queen).
-
-        // If you do always promote to queen, then:
+        // A pawn was promoted at 'promoted_square'. The generic restore
+        // above moved the promoted piece (whatever type sits on the end
+        // square: Q/R/B/N) back to the start square; now turn it back
+        // into a pawn. Any captured piece has already been restored on
+        // the end square by the generic code.
         Color promoColor = piece.getColor();
 
-        // - Remove the queen from the start_bit
-        if (promoColor == Color::WHITE) {
-            white_queens &= ~start_bit; 
-        } else {
-            black_queens &= ~start_bit;
+        // - Remove the promoted piece from the start square's bitboard
+        switch (piece.getType()) {
+            case PieceType::KNIGHT:
+                (promoColor == Color::WHITE ? white_knights : black_knights) &= ~start_bit;
+                break;
+            case PieceType::BISHOP:
+                (promoColor == Color::WHITE ? white_bishops : black_bishops) &= ~start_bit;
+                break;
+            case PieceType::ROOK:
+                (promoColor == Color::WHITE ? white_rooks : black_rooks) &= ~start_bit;
+                break;
+            default: // QUEEN
+                (promoColor == Color::WHITE ? white_queens : black_queens) &= ~start_bit;
+                break;
         }
 
         // - Add the pawn back
@@ -717,7 +817,7 @@ void Board::undo_move(const Move & move, const Piece & captured_piece) {
             black_pawns |= start_bit;
         }
 
-        // 2) Also revert the 2D board array. 
+        // 2) Also revert the 2D board array.
         board[static_cast<size_t>(move.start_rank)][static_cast<size_t>(move.start_file)] = Piece(PieceType::PAWN, promoColor);
     }
 
@@ -727,6 +827,11 @@ void Board::undo_move(const Move & move, const Piece & captured_piece) {
         ep = en_passant_stack.top();
     else
         ep = 64;
+
+    // Restore the en-passant member to match. Previously only the stack
+    // was popped, so en_passant_square kept the value created by the move
+    // being undone (e.g. undoing a double push left its EP square set).
+    en_passant_square = ep;
 
     // Restore the board state for en passant capture, if applicable
     if (move.end_rank * 8 + move.end_file == ep &&
@@ -808,8 +913,26 @@ vector<Move> Board::generate_all_moves(Color color) {
 
 void Board::generate_pawn_moves(uint64_t pawns, Color color, vector<Move> & moves) {
     // Precompute empty squares, direction, etc.
-    uint64_t empty = ~all_pieces;  
+    uint64_t empty = ~all_pieces;
     int direction = (color == Color::WHITE) ? 8 : -8;
+
+    // Append one pawn move, expanding moves to the last rank into the
+    // four promotion choices. (Double pushes and en-passant captures can
+    // never reach the last rank, so they don't use this.)
+    auto push_pawn_move = [&moves](int from_square, int to_square) {
+        const int to_rank = to_square / 8;
+        if (to_rank == 0 || to_rank == 7) {
+            for (PieceType promo :
+                 {PieceType::QUEEN, PieceType::ROOK, PieceType::BISHOP,
+                  PieceType::KNIGHT}) {
+                moves.push_back({from_square % 8, from_square / 8,
+                                 to_square % 8, to_square / 8, promo});
+            }
+        } else {
+            moves.push_back({from_square % 8, from_square / 8,
+                             to_square % 8, to_square / 8});
+        }
+    };
 
     // Single pushes
     uint64_t single_pushes = (color == Color::WHITE)
@@ -821,8 +944,7 @@ void Board::generate_pawn_moves(uint64_t pawns, Color color, vector<Move> & move
         single_pushes &= (single_pushes - 1);
 
         int from_square = to_square - direction;
-        moves.push_back({from_square % 8, from_square / 8,
-                        to_square % 8,   to_square / 8});
+        push_pawn_move(from_square, to_square);
     }
 
     // Double pushes (only from starting rank)
@@ -856,8 +978,7 @@ void Board::generate_pawn_moves(uint64_t pawns, Color color, vector<Move> & move
         left_capt &= (left_capt - 1);
 
         int from_square = to_square - (direction + 1);
-        moves.push_back({from_square % 8, from_square / 8,
-                        to_square % 8,   to_square / 8});
+        push_pawn_move(from_square, to_square);
     }
 
     // right captures
@@ -870,8 +991,7 @@ void Board::generate_pawn_moves(uint64_t pawns, Color color, vector<Move> & move
         right_capt &= (right_capt - 1);
 
         int from_square = to_square - (direction - 1);
-        moves.push_back({from_square % 8, from_square / 8,
-                        to_square % 8,   to_square / 8});
+        push_pawn_move(from_square, to_square);
     }
 
     // En passant
@@ -1370,10 +1490,14 @@ bool Board::is_check(uint64_t king_pos, Color king_color) {
 
 
 bool Board::is_stalemate(Color color) {
-    bool is = is_checkmate(color);
-    is = false;
-    return is;
-} //fixme
+    // Stalemate: the side is not in check but has no legal moves.
+    // (generate_legal_moves internally makes/undoes moves, but restores
+    // the position exactly, so this query does not mutate board state.)
+    if (is_check(color))
+        return false;
+
+    return generate_legal_moves(color).empty();
+}
 
 
 bool Board::is_checkmate(Color color) {
@@ -1390,30 +1514,8 @@ bool Board::is_checkmate(Color color) {
 //  0b0010 = White can castle Queenside
 //  0b0100 = Black can castle Kingside
 //  0b1000 = Black can castle Queenside
-uint16_t Board::getCastlingRights() {
-    uint16_t rights = 0;
-
-    // White King-side castling
-    if ((white_kings & (1ULL << 4)) && (white_rooks & (1ULL << 7))) {
-        rights |= 0b0001;  // White King-side castling
-    }
-
-    // White Queen-side castling
-    if ((white_kings & (1ULL << 4)) && (white_rooks & (1ULL << 0))) {
-        rights |= 0b0010;  // White Queen-side castling
-    }
-
-    // Black King-side castling
-    if ((black_kings & (1ULL << 60)) && (black_rooks & (1ULL << 63))) {
-        rights |= 0b0100;  // Black King-side castling
-    }
-
-    // Black Queen-side castling
-    if ((black_kings & (1ULL << 60)) && (black_rooks & (1ULL << 56))) {
-        rights |= 0b1000;  // Black Queen-side castling
-    }
-
-    return rights;
+uint16_t Board::getCastlingRights() const {
+    return castling_rights;
 }
 
 
@@ -1602,21 +1704,22 @@ bool Board::is_within_bounds(int rank, int file) {
 
 
 std::vector<Move> Board::generate_legal_moves(Color color) {
-    // Compute attack masks for both sides first
 
+    // Compute attack masks for both sides first
 // 1) Recompute all attack masks:
     //    - who attacks what squares
     compute_attack_masks();
 
     // 2) Identify our king’s square so we can detect pins
     uint64_t king_bb = (color == Color::WHITE) ? white_kings : black_kings;
-    if (king_bb == 0ULL) {
-        // No king? (should never happen, but just in case)
-        return {};
-    }
-    int king_sq = __builtin_ctzll(king_bb);
 
-    // 3) Detect pinned pieces (stores pins in pinned_pieces, pin_line, etc.)
+    if (king_bb == 0ULL) {
+        // No king detected, SOMETHING HAS GONE TERRIBLY WRONG
+        throw Error("No King");
+    }
+    int king_sq = __builtin_ctzll(king_bb); //get index of lsb
+
+    // stores pins in pinned_pieces, pin_line, etc
     detect_pins(color, king_sq);
 
     // 4) Generate *all* pseudo-legal moves
@@ -2133,3 +2236,361 @@ bool Board::is_sliding_piece(PieceType type) const {
     return (type == PieceType::BISHOP || type == PieceType::ROOK || type == PieceType::QUEEN);
 }
 
+
+
+
+
+bool Board::set_from_fen(const std::string& fen)
+{
+    std::istringstream ss(fen);
+
+    std::string piece_placement;
+    std::string active_color;
+    std::string castling;
+    std::string en_passant;
+    int halfmove_clock;
+    int fullmove_number;
+
+    if (!(ss >> piece_placement
+             >> active_color
+             >> castling
+             >> en_passant
+             >> halfmove_clock
+             >> fullmove_number))
+    {
+        return false;
+    }
+
+    clear();
+
+    // -------------------------
+    // 1. Piece placement
+    // -------------------------
+
+    int rank = 7;
+    int file = 0;
+
+    for (char c : piece_placement)
+    {
+        if (c == '/')
+        {
+            if (file != 8 || rank == 0)
+                return false;
+
+            --rank;
+            file = 0;
+            continue;
+        }
+
+        if (std::isdigit(static_cast<unsigned char>(c)))
+        {
+            int empty_count = c - '0';
+
+            if (empty_count < 1 || empty_count > 8)
+                return false;
+
+            file += empty_count;
+
+            if (file > 8)
+                return false;
+
+            continue;
+        }
+
+        if (file >= 8)
+            return false;
+
+        Color color =
+            std::isupper(static_cast<unsigned char>(c))
+                ? Color::WHITE
+                : Color::BLACK;
+
+        PieceType type;
+
+        switch (std::tolower(static_cast<unsigned char>(c)))
+        {
+            case 'p': type = PieceType::PAWN;   break;
+            case 'n': type = PieceType::KNIGHT; break;
+            case 'b': type = PieceType::BISHOP; break;
+            case 'r': type = PieceType::ROOK;   break;
+            case 'q': type = PieceType::QUEEN;  break;
+            case 'k': type = PieceType::KING;   break;
+            default:
+                return false;
+        }
+
+        int square = rank * 8 + file;
+        uint64_t bit = 1ULL << square;
+
+        board[static_cast<size_t>(rank)][static_cast<size_t>(file)] =
+            Piece(type, color, static_cast<size_t>(square));
+
+        if (color == Color::WHITE)
+        {
+            switch (type)
+            {
+                case PieceType::PAWN:   white_pawns   |= bit; break;
+                case PieceType::KNIGHT: white_knights |= bit; break;
+                case PieceType::BISHOP: white_bishops |= bit; break;
+                case PieceType::ROOK:   white_rooks   |= bit; break;
+                case PieceType::QUEEN:  white_queens  |= bit; break;
+                case PieceType::KING:   white_kings   |= bit; break;
+                default: break;
+            }
+        }
+        else
+        {
+            switch (type)
+            {
+                case PieceType::PAWN:   black_pawns   |= bit; break;
+                case PieceType::KNIGHT: black_knights |= bit; break;
+                case PieceType::BISHOP: black_bishops |= bit; break;
+                case PieceType::ROOK:   black_rooks   |= bit; break;
+                case PieceType::QUEEN:  black_queens  |= bit; break;
+                case PieceType::KING:   black_kings   |= bit; break;
+                default: break;
+            }
+        }
+
+        ++file;
+    }
+
+    if (rank != 0 || file != 8)
+        return false;
+
+    // -------------------------
+    // 2. Occupancy bitboards
+    // -------------------------
+
+    all_white_pieces =
+        white_pawns |
+        white_knights |
+        white_bishops |
+        white_rooks |
+        white_queens |
+        white_kings;
+
+    all_black_pieces =
+        black_pawns |
+        black_knights |
+        black_bishops |
+        black_rooks |
+        black_queens |
+        black_kings;
+
+    all_pieces = all_white_pieces | all_black_pieces;
+
+    // -------------------------
+    // 3. Side to move / turn index
+    // -------------------------
+
+    if (fullmove_number < 1)
+        return false;
+
+    turn_index = static_cast<size_t>(2 * (fullmove_number - 1));
+
+    if (active_color == "b")
+    {
+        ++turn_index;
+    }
+    else if (active_color != "w")
+    {
+        return false;
+    }
+
+    // -------------------------
+    // 4. Castling rights
+    // -------------------------
+
+    if (castling != "-")
+    {
+        for (char c : castling)
+        {
+            switch (c)
+            {
+                case 'K':
+                    castling_rights |= WHITE_KINGSIDE;
+                    break;
+
+                case 'Q':
+                    castling_rights |= WHITE_QUEENSIDE;
+                    break;
+
+                case 'k':
+                    castling_rights |= BLACK_KINGSIDE;
+                    break;
+
+                case 'q':
+                    castling_rights |= BLACK_QUEENSIDE;
+                    break;
+
+                default:
+                    return false;
+            }
+        }
+    }
+
+    // Replace this with however YOUR Board stores castling rights.
+    // Example:
+    // castling_rights = rights;
+
+    // -------------------------
+    // 5. En passant
+    // -------------------------
+
+    if (en_passant == "-")
+    {
+        en_passant_square = 64;
+    }
+    else
+    {
+        if (en_passant.size() != 2)
+            return false;
+
+        int ep_file = en_passant[0] - 'a';
+        int ep_rank = en_passant[1] - '1';
+
+        if (ep_file < 0 || ep_file >= 8 ||
+            ep_rank < 0 || ep_rank >= 8)
+        {
+            return false;
+        }
+
+        en_passant_square = ep_rank * 8 + ep_file;
+    }
+
+    // Move generation reads the en-passant target from the stack, so seed
+    // it with the value just loaded. Without this, an EP target given by
+    // FEN was silently ignored by generate_pawn_moves(). clear() above
+    // emptied the stack, so this becomes its only entry.
+    en_passant_stack.push(en_passant_square);
+
+    compute_attack_masks();
+
+    return true;
+}
+
+
+
+std::string Board::to_fen() const
+{
+    std::ostringstream fen;
+
+    // -------------------------
+    // 1. Piece placement
+    // -------------------------
+
+    for (int rank = 7; rank >= 0; --rank)
+    {
+        int empty_count = 0;
+
+        for (int file = 0; file < 8; ++file)
+        {
+            const Piece& piece =
+                board[static_cast<size_t>(rank)][static_cast<size_t>(file)];
+
+            if (piece.getType() == PieceType::NONE)
+            {
+                ++empty_count;
+                continue;
+            }
+
+            if (empty_count > 0)
+            {
+                fen << empty_count;
+                empty_count = 0;
+            }
+
+            char c;
+
+            switch (piece.getType())
+            {
+                case PieceType::PAWN:   c = 'p'; break;
+                case PieceType::KNIGHT: c = 'n'; break;
+                case PieceType::BISHOP: c = 'b'; break;
+                case PieceType::ROOK:   c = 'r'; break;
+                case PieceType::QUEEN:  c = 'q'; break;
+                case PieceType::KING:   c = 'k'; break;
+                default:
+                    c = '?';
+                    break;
+            }
+
+            if (piece.getColor() == Color::WHITE)
+            {
+                c = static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(c))
+                );
+            }
+
+            fen << c;
+        }
+
+        if (empty_count > 0)
+            fen << empty_count;
+
+        if (rank != 0)
+            fen << '/';
+    }
+
+    // -------------------------
+    // 2. Active color
+    // -------------------------
+
+    fen << ' '
+        << ((turn_index % 2 == 0) ? 'w' : 'b');
+
+    // -------------------------
+    // 3. Castling rights
+    // -------------------------
+
+    fen << ' ';
+
+    uint16_t rights = getCastlingRights();
+
+    if (rights == 0)
+    {
+        fen << '-';
+    }
+    else
+    {
+        if (rights & (1 << 0)) fen << 'K';
+        if (rights & (1 << 1)) fen << 'Q';
+        if (rights & (1 << 2)) fen << 'k';
+        if (rights & (1 << 3)) fen << 'q';
+    }
+
+    // -------------------------
+    // 4. En passant
+    // -------------------------
+
+    fen << ' ';
+
+    if (en_passant_square == 64)
+    {
+        fen << '-';
+    }
+    else
+    {
+        int ep_file = en_passant_square % 8;
+        int ep_rank = en_passant_square / 8;
+
+        fen << static_cast<char>('a' + ep_file);
+        fen << static_cast<char>('1' + ep_rank);
+    }
+
+    // -------------------------
+    // 5. Halfmove clock
+    // -------------------------
+
+    // You don't currently store this.
+    fen << " 0";
+
+    // -------------------------
+    // 6. Fullmove number
+    // -------------------------
+
+    fen << ' ' << (turn_index / 2 + 1);
+
+    return fen.str();
+}

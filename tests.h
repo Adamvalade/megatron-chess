@@ -3,7 +3,6 @@
 
 #include "board.h"
 #include "engine.h"
-#include "game.h"
 #include "Piece.h"
 #include "magic.h"
 #include <set>

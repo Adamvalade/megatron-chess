@@ -1,12 +1,16 @@
+#pragma once
+
 #include <fstream>
 #include <iostream>
 #include <cassert>
-#include <unordered_set> 
+#include <unordered_set>
 
 using namespace std;
 
 
-void find_missing_positions(const std::string file1, const std::string file2) {
+// inline: this function is defined in a header included by multiple
+// translation units; without inline it causes duplicate-symbol link errors.
+inline void find_missing_positions(const std::string file1, const std::string file2) {
     unordered_set<string> lines_5_plies;
     unordered_set<string> lines_output;
 
@@ -42,3 +46,20 @@ void find_missing_positions(const std::string file1, const std::string file2) {
         }
     }
 }
+
+
+class Error {
+
+    public:
+
+    Error(const string & msg_val) : msg(msg_val) {}
+    Error() : msg("ERROR\n") {}
+
+    void what() const { 
+        cerr << msg;
+    }
+
+    private:
+
+    const string msg;
+};

@@ -1,6 +1,11 @@
 #ifndef ENGINE_H
 #define ENGINE_H
 
+#include <chrono>
+#include <iostream>
+
+class Board;
+
 struct Options {
     bool test = false;
     bool diff_check = false;

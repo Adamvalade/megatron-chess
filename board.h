@@ -8,17 +8,40 @@
 #include <functional> // For hash
 #include <cstddef>
 #include <stack>
+#include <sstream>
+#include <cctype>
 #include "Piece.h"
 #include "magic.h"
+#include "utilities.h"
 
 using namespace std;
 
 const uint64_t FILE_A = 0x0101010101010101ULL; // The A file (left-most)
 const uint64_t FILE_H = 0x8080808080808080ULL; // The H file (right-most)
 
+
+static constexpr uint16_t WHITE_KINGSIDE  = 1 << 0;
+static constexpr uint16_t WHITE_QUEENSIDE = 1 << 1;
+static constexpr uint16_t BLACK_KINGSIDE  = 1 << 2;
+static constexpr uint16_t BLACK_QUEENSIDE = 1 << 3;
+
 struct Move {
     int start_file, start_rank;
     int end_file, end_rank;
+    // Promotion choice for pawn moves to the last rank; PieceType::NONE
+    // for all other moves. Defaulted so existing Move{file, rank, file,
+    // rank} constructions keep working (make_move treats NONE on the
+    // last rank as "queen", preserving historical behavior for
+    // hand-built moves).
+    PieceType promotion = PieceType::NONE;
+
+    bool operator==(const Move &other) const {
+        return start_file == other.start_file &&
+               start_rank == other.start_rank &&
+               end_file == other.end_file && end_rank == other.end_rank &&
+               promotion == other.promotion;
+    }
+    bool operator!=(const Move &other) const { return !(*this == other); }
 };
 
 
@@ -122,7 +145,7 @@ public:
     bool check_castling(Piece & p, const Move & m);
     bool is_within_bounds(int rank, int file);
 
-    uint16_t getCastlingRights();
+    uint16_t getCastlingRights() const;
     uint8_t getEnPassantSquare() const ;
 
     vector<Move> generate_all_moves(Color color);
@@ -148,6 +171,8 @@ public:
     void generate_king_moves(uint64_t kings, Color color, vector<Move> & moves, bool double_check);
     uint64_t get_between_squares(int from_sq, int to_sq) const;
     bool is_sliding_piece(PieceType type) const;
+    bool set_from_fen(const string & fen); // necessary for UCI
+    string to_fen() const;
 
 
 private:
@@ -197,11 +222,27 @@ private:
     stack<int> en_passant_stack;
     stack<int> promotion_stack;
     stack<bool> castling_stack;
+    stack<uint16_t> castling_rights_stack; // rights before each made move
 
     magic_bits::Attacks magicAttacks; // Instance for magic bitboard attacks
+    uint16_t castling_rights = 0;
 
     size_t turn_index = 0;
 };
+
+
+// Castling rights bitmask:
+//
+// bit 0 (0b0001): White kingside  - K
+// bit 1 (0b0010): White queenside - Q
+// bit 2 (0b0100): Black kingside  - k
+// bit 3 (0b1000): Black queenside - q
+//
+// Multiple rights can coexist, e.g.
+// 0b1111 = KQkq
+// 0b0101 = Kk
+// 0b0000 = no castling rights
+
 
 
 #endif
