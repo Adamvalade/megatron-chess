@@ -1,8 +1,3 @@
-// test_perft.cpp -- perft (performance test) correctness runner for Megatron.
-//
-// Perft counts the leaf nodes of the legal move tree to a fixed depth.
-// The counts are deterministic and published, so any mismatch is proof of
-// a move-generation / make-move / undo-move bug. Reference counts are the
 // standard ChessProgrammingWiki perft suite:
 //   https://www.chessprogramming.org/Perft_Results
 //
@@ -23,6 +18,7 @@
 //
 // Build: make test_perft   (uses the Makefile's existing test* machinery)
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -32,14 +28,18 @@
 #include <vector>
 
 #include "board.h"
+#include "eval.h"
+#include "pstTables.h"
+#include "search.h"
+#include "zobrist.h"
 
 using namespace std;
 
 namespace {
 
 struct Position {
-    const char *name;
-    const char *fen;
+    const char * name;
+    const char * fen;
     // (depth, expected leaf-node count) pairs, shallow to deep.
     vector<pair<int, uint64_t>> depths;
 };
@@ -584,6 +584,674 @@ void test_checkmate_and_stalemate() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Static evaluation tests (R6). Scores are centipawns from the side to
+// move's perspective.
+// ---------------------------------------------------------------------------
+
+void test_evaluation() {
+    { // Starting position is exactly equal.
+        Board board;
+        unit_check(evaluate_board(board) == 0,
+                   "eval: starting position is 0");
+    }
+    { // Material advantage + perspective: same placement, score must
+      // flip sign exactly when the side to move flips.
+        Board white_to_move;
+        white_to_move.set_from_fen("7k/8/8/8/8/8/8/Q6K w - - 0 1");
+        Board black_to_move;
+        black_to_move.set_from_fen("7k/8/8/8/8/8/8/Q6K b - - 0 1");
+        const int as_white = evaluate_board(white_to_move);
+        const int as_black = evaluate_board(black_to_move);
+        unit_check(as_white == 880,
+                   "eval: queen up scores +880 for White to move");
+        unit_check(as_black == -as_white,
+                   "eval: score negates when side to move changes");
+    }
+    {
+        Board central;
+        central.set_from_fen("7k/8/8/8/3N4/8/8/K7 w - - 0 1");
+        Board corner;
+        corner.set_from_fen("N6k/8/8/8/8/8/8/K7 w - - 0 1");
+        unit_check(evaluate_board(central) - evaluate_board(corner) == 29,
+                   "eval: Nd4 outscores Na8 by the scaled PST difference (29)");
+    }
+    { // Vertical-mirror symmetry: White Nd4/Ka1 vs Kh8 mirrors to Black
+      // Nd5/Ka8 vs Kh1; with Black to move the scores must be equal.
+        Board white;
+        white.set_from_fen("7k/8/8/8/3N4/8/8/K7 w - - 0 1");
+        Board mirrored;
+        mirrored.set_from_fen("k7/8/8/3n4/8/8/8/7K b - - 0 1");
+        unit_check(evaluate_board(white) == evaluate_board(mirrored),
+                   "eval: vertically mirrored positions score equally");
+    }
+    { // Black PST orientation: a black knight centralized on d5 must
+      // score as well for Black (to move) as the white one did above.
+        Board black_central;
+        black_central.set_from_fen("k7/8/8/3n4/8/8/8/7K b - - 0 1");
+        Board black_corner;
+        black_corner.set_from_fen("k7/8/8/8/8/8/8/n6K b - - 0 1");
+        unit_check(evaluate_board(black_central) -
+                           evaluate_board(black_corner) ==
+                       29,
+                   "eval: black Nd5 outscores black Na1 by 29");
+    }
+    { // Evaluation must not mutate the board.
+        Board board;
+        board.set_from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w "
+            "KQkq - 0 1");
+        const Snapshot before = take_snapshot(board);
+        (void)evaluate_board(board);
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "eval: does not mutate the board");
+    }
+}
+
+bool move_is_legal(Board &board, const Move &move) {
+    for (const Move &legal : board.generate_all_moves(board.get_color())) {
+        if (legal == move) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool delivers_checkmate(Board &board, const Move &move) {
+    const Piece captured = board.get_piece_at(move.end_rank, move.end_file);
+    board.make_move(move);
+    const Color opponent = board.get_color();
+    const bool mate = board.is_checkmate(opponent);
+    board.undo_move(move, captured);
+    return mate;
+}
+
+int reference_negamax(Board &board, int depth, int ply, uint64_t &nodes) {
+    if (depth == 0) {
+        uint64_t qnodes = 0;
+        return search_quiescence(board, nodes, qnodes, ply);
+    }
+    ++nodes;
+    const Color side = board.get_color();
+    const vector<Move> moves = board.generate_all_moves(side);
+    if (moves.empty()) {
+        return board.is_check(side) ? -MATE_SCORE + ply : 0;
+    }
+    int best_score = -SEARCH_INF;
+    for (const Move &move : moves) {
+        const Piece captured = board.get_piece_at(move.end_rank, move.end_file);
+        board.make_move(move);
+        const int score = -reference_negamax(board, depth - 1, ply + 1, nodes);
+        board.undo_move(move, captured);
+        if (score > best_score) {
+            best_score = score;
+        }
+    }
+    return best_score;
+}
+
+int reference_root_score(Board &board, int depth) {
+    const vector<Move> moves = board.generate_all_moves(board.get_color());
+    if (moves.empty()) {
+        return board.is_check(board.get_color()) ? -MATE_SCORE : 0;
+    }
+    int best_score = -SEARCH_INF;
+    for (const Move &move : moves) {
+        const Piece captured = board.get_piece_at(move.end_rank, move.end_file);
+        board.make_move(move);
+        uint64_t nodes = 0;
+        const int score = -reference_negamax(board, depth - 1, 1, nodes);
+        board.undo_move(move, captured);
+        if (score > best_score) {
+            best_score = score;
+        }
+    }
+    return best_score;
+}
+
+void test_alpha_beta_matches_reference() {
+    const char *fens[] = {
+        "4k3/8/8/3n4/2B5/8/8/4K3 w - - 0 1",
+        "4k3/8/8/3q4/8/2N5/8/4K3 w - - 0 1",
+        "4k3/8/8/8/8/3r4/8/3RK3 w - - 0 1",
+        "r3k3/8/8/3N4/8/8/8/4K3 w - - 0 1",
+        "6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1",
+    };
+    for (const char *fen : fens) {
+        for (int depth = 1; depth <= 4; ++depth) {
+            Board ab_board;
+            ab_board.set_from_fen(fen);
+            const SearchResult ab_result = find_best_move(ab_board, depth);
+
+            Board ref_board;
+            ref_board.set_from_fen(fen);
+            const int ref_score = reference_root_score(ref_board, depth);
+
+            unit_check(ab_result.score == ref_score,
+                       ("ab vs ref scores match at depth " + to_string(depth))
+                           .c_str());
+        }
+    }
+}
+
+int material_white_perspective(const Board &board) {
+    constexpr int values[6] = {100, 320, 330, 500, 900, 0};
+    int score = 0;
+    for (Color color : {Color::WHITE, Color::BLACK}) {
+        const int sign = (color == Color::WHITE) ? 1 : -1;
+        for (PieceType type :
+             {PieceType::PAWN, PieceType::KNIGHT, PieceType::BISHOP,
+              PieceType::ROOK, PieceType::QUEEN, PieceType::KING}) {
+            uint64_t pieces = board.get_bitboard(type, color);
+            while (pieces) {
+                pieces &= pieces - 1;
+                score += sign * values[static_cast<size_t>(type)];
+            }
+        }
+    }
+    return score;
+}
+
+int pst_white_perspective(const Board &board) {
+    const int (*tables[6])[8] = {PAWN_MIDGAME, PST_KNIGHT, PST_BISHOPS,
+                                 PST_ROOK,     PST_QUEEN,  KING_MIDGAME};
+    int score = 0;
+    for (Color color : {Color::WHITE, Color::BLACK}) {
+        const int sign = (color == Color::WHITE) ? 1 : -1;
+        for (size_t type = 0; type < 6; ++type) {
+            uint64_t pieces = board.get_bitboard(static_cast<PieceType>(type),
+                                                 color);
+            while (pieces) {
+                const int square = __builtin_ctzll(pieces);
+                pieces &= pieces - 1;
+                const int rank = square / 8;
+                const int file = square % 8;
+                const int row =
+                    (color == Color::WHITE) ? (7 - rank) : rank;
+                score += sign * (tables[type][row][file] / 10);
+            }
+        }
+    }
+    return score;
+}
+
+void test_eval_material_dominates_pst() {
+    Board before;
+    before.set_from_fen("r3k3/8/8/3N4/8/8/8/4K3 w - - 0 1");
+    Board after_fork_win;
+    after_fork_win.set_from_fen("N3k3/8/8/8/8/8/8/4K3 w - - 0 1");
+    const int material_gain = material_white_perspective(after_fork_win) -
+                              material_white_perspective(before);
+    const int pst_delta = pst_white_perspective(after_fork_win) -
+                          pst_white_perspective(before);
+    unit_check(material_gain == 500,
+               "eval balance: capturing rook via fork gains 500 material");
+    unit_check(material_gain + pst_delta > 200,
+               "eval balance: material gain still dominates PST after scale");
+    unit_check(evaluate_board(after_fork_win) > 200,
+               "eval balance: up-a-rook end state stays clearly positive");
+}
+
+struct TacticCase {
+    const char *name;
+    const char *fen;
+    const char *expected_move;
+    bool expect_avoid;
+};
+
+void test_tactics() {
+    const TacticCase cases[] = {
+        {"hanging rook", "4k3/8/8/8/8/3r4/8/3RK3 w - - 0 1", "d1d3", false},
+        {"hanging queen", "4k3/8/8/3q4/8/2N5/8/4K3 w - - 0 1", "c3d5", false},
+        {"free minor piece", "4k3/8/8/3n4/2B5/8/8/4K3 w - - 0 1", "c4d5",
+         false},
+        {"free knight with rook", "4k3/8/8/8/8/8/1n6/1R2K3 w - - 0 1", "b1b2",
+         false},
+        {"bad exchange sac", "1n2k3/8/2b5/8/8/8/8/2R1K3 w - - 0 1", "c1c6",
+         true},
+        {"knight fork", "r3k3/8/8/3N4/8/8/8/4K3 w - - 0 1", "d5c7", false},
+        {"forced recapture", "4k3/8/3n4/3R4/8/8/8/4K3 w - - 0 1", "d5d6",
+         false},
+        {"mate in one", "6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1", "e1e8", false},
+        {"mate in two", "k7/8/1K6/8/8/8/8/1R6 w - - 0 1", "", false},
+    };
+
+    for (const TacticCase &tactic : cases) {
+        for (int depth : {2, 4, 6}) {
+            if (string(tactic.name) == "mate in two" && depth == 2) {
+                continue;
+            }
+            Board board;
+            board.set_from_fen(tactic.fen);
+            const auto started = chrono::steady_clock::now();
+            const SearchResult result = find_best_move(board, depth);
+            const auto elapsed =
+                chrono::duration_cast<chrono::milliseconds>(
+                    chrono::steady_clock::now() - started)
+                    .count();
+            const string best =
+                result.found_move ? move_to_string(result.best_move) : "0000";
+            cout << "  tactic " << tactic.name << " d" << depth << " => "
+                 << best << " score=" << result.score
+                 << " nodes=" << result.nodes << " time=" << elapsed << "ms\n";
+
+            if (string(tactic.name) == "mate in two") {
+                unit_check(result.score == MATE_SCORE - 3,
+                           ("tactics: mate in two at depth " + to_string(depth))
+                               .c_str());
+                continue;
+            }
+            if (string(tactic.name) == "mate in one") {
+                unit_check(best == tactic.expected_move &&
+                               result.score == MATE_SCORE - 1,
+                           ("tactics: mate in one at depth " + to_string(depth))
+                               .c_str());
+                continue;
+            }
+            if (tactic.expect_avoid) {
+                unit_check(best != tactic.expected_move,
+                           ("tactics: avoid " + string(tactic.name) + " at d" +
+                            to_string(depth))
+                               .c_str());
+            } else {
+                unit_check(best == tactic.expected_move,
+                           ("tactics: " + string(tactic.name) + " at d" +
+                            to_string(depth) + " expected " +
+                            string(tactic.expected_move) + " got " + best)
+                               .c_str());
+            }
+        }
+    }
+}
+
+void test_quiescence() {
+    {
+        Board board;
+        board.set_from_fen("r3k3/8/8/3N4/8/8/8/4K3 w - - 0 1");
+        const SearchResult shallow = find_best_move(board, 2);
+        unit_check(shallow.found_move &&
+                       move_to_string(shallow.best_move) == "d5c7",
+                   "quiescence: depth 2 finds knight fork (horizon capture)");
+        unit_check(shallow.score > 200,
+                   "quiescence: fork score reflects winning the rook");
+        unit_check(shallow.qnodes > 0,
+                   "quiescence: records quiescence nodes on tactical search");
+    }
+    {
+        Board board;
+        board.set_from_fen("4k3/8/8/8/8/3r4/8/3RK3 w - - 0 1");
+        const SearchResult result = find_best_move(board, 1);
+        unit_check(result.found_move &&
+                       move_to_string(result.best_move) == "d1d3",
+                   "quiescence: depth 1 takes hanging rook at horizon");
+    }
+    {
+        Board board;
+        board.set_from_fen("1n2k3/8/2b5/8/8/8/8/2R1K3 w - - 0 1");
+        const SearchResult result = find_best_move(board, 2);
+        unit_check(result.found_move &&
+                       move_to_string(result.best_move) != "c1c6",
+                   "quiescence: refuses capture of defended bishop");
+    }
+    {
+        Board board;
+        board.set_from_fen("4k3/4r3/8/8/8/8/8/4K3 w - - 0 1");
+        const Snapshot before = take_snapshot(board);
+        const SearchResult result = find_best_move(board, 2);
+        unit_check(result.found_move,
+                   "quiescence: check requires a quiet evasion move");
+        unit_check(move_to_string(result.best_move) == "e1d1" ||
+                       move_to_string(result.best_move) == "e1d2" ||
+                       move_to_string(result.best_move) == "e1f1" ||
+                       move_to_string(result.best_move) == "e1f2",
+                   "quiescence: king steps out of rook check");
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "quiescence: preserves board after check evasion search");
+    }
+    {
+        Board board;
+        board.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1");
+        const Piece captured = board.get_piece_at(7, 4);
+        board.make_move(parse_move_str("e1e8"));
+        uint64_t nodes = 0;
+        uint64_t qnodes = 0;
+        const int score = search_quiescence(board, nodes, qnodes);
+        board.undo_move(parse_move_str("e1e8"), captured);
+        unit_check(score == -MATE_SCORE,
+                   "quiescence: checkmate at horizon returns mate score");
+    }
+    {
+        Board board;
+        board.set_from_fen(
+            "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 3");
+        uint64_t nodes = 0;
+        uint64_t qnodes = 0;
+        const int score = search_quiescence(board, nodes, qnodes);
+        unit_check(score == -MATE_SCORE,
+                   "quiescence: already checkmated position scores as mate");
+    }
+    {
+        Board board;
+        board.set_from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
+        uint64_t nodes = 0;
+        uint64_t qnodes = 0;
+        const int score = search_quiescence(board, nodes, qnodes);
+        unit_check(score == 0,
+                   "quiescence: stalemate at horizon returns 0");
+    }
+    {
+        Board board;
+        board.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        const SearchResult result = find_best_move(board, 1);
+        unit_check(result.found_move &&
+                       move_to_string(result.best_move) == "e5d6",
+                   "quiescence: considers en passant capture");
+        uint64_t nodes = 0;
+        uint64_t qnodes = 0;
+        bool ep_seen = false;
+        for (const Move &move : board.generate_all_moves(board.get_color())) {
+            if (move_to_string(move) == "e5d6") {
+                ep_seen = true;
+                const Piece captured =
+                    board.get_piece_at(move.end_rank, move.end_file);
+                board.make_move(move);
+                (void)search_quiescence(board, nodes, qnodes);
+                board.undo_move(move, captured);
+            }
+        }
+        unit_check(ep_seen, "quiescence: en passant move is legal in EP test");
+    }
+    {
+        Board board;
+        board.set_from_fen("8/P7/8/8/8/8/8/4K2k w - - 0 1");
+        const SearchResult result = find_best_move(board, 1);
+        unit_check(result.found_move &&
+                       move_to_string(result.best_move).rfind("a7a8", 0) == 0,
+                   "quiescence: searches promotion moves");
+        unit_check(result.score > 500,
+                   "quiescence: promotion is strongly preferred");
+    }
+    {
+        Board board;
+        board.set_from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1");
+        const Snapshot before = take_snapshot(board);
+        uint64_t nodes = 0;
+        uint64_t qnodes = 0;
+        const int score = search_quiescence(board, nodes, qnodes);
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "quiescence: preserves board with no tactical moves");
+        unit_check(score == evaluate_board(board),
+                   "quiescence: quiet position returns stand-pat eval");
+        unit_check(qnodes == 1,
+                   "quiescence: quiet leaf counts one quiescence node");
+    }
+}
+
+void test_search() {
+    {
+        Board board;
+        board.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1");
+        const Snapshot before = take_snapshot(board);
+        const SearchResult result = find_best_move(board, 1);
+        unit_check(result.found_move, "search: mate in 1 finds a move");
+        unit_check(move_is_legal(board, result.best_move),
+                   "search: mate in 1 move is legal");
+        unit_check(delivers_checkmate(board, result.best_move),
+                   "search: mate in 1 move delivers checkmate");
+        unit_check(result.score == MATE_SCORE - 1,
+                   "search: mate in 1 score is MATE_SCORE-1");
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "search: mate in 1 preserves board state");
+    }
+    {
+        Board board;
+        board.set_from_fen("k7/8/1K6/8/8/8/8/1R6 w - - 0 1");
+        const Snapshot before = take_snapshot(board);
+        const SearchResult shallow = find_best_move(board, 1);
+        const SearchResult deep = find_best_move(board, 3);
+        unit_check(deep.found_move && move_is_legal(board, deep.best_move),
+                   "search: mate in 2 finds a legal move at depth 3");
+        unit_check(deep.score == MATE_SCORE - 3,
+                   "search: mate in 2 score is MATE_SCORE-3 at depth 3");
+        unit_check(shallow.score < MATE_SCORE - 1000,
+                   "search: depth 1 cannot force the mate in 2");
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "search: mate in 2 preserves board state");
+    }
+    {
+        Board board;
+        board.set_from_fen("7k/QQ6/8/8/8/8/8/7K w - - 0 1");
+        const SearchResult result = find_best_move(board, 2);
+        unit_check(result.found_move && delivers_checkmate(board, result.best_move),
+                   "search: prefers a move that mates immediately");
+        unit_check(result.score == MATE_SCORE - 1,
+                   "search: immediate mate scores higher than delayed mates");
+    }
+    {
+        Board board;
+        board.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/4R1K1 b - - 0 1");
+        const SearchResult result = find_best_move(board, 2);
+        unit_check(result.found_move, "search: avoiding mate finds a move");
+        const Piece captured =
+            board.get_piece_at(result.best_move.end_rank, result.best_move.end_file);
+        board.make_move(result.best_move);
+        const SearchResult white_reply = find_best_move(board, 1);
+        const bool white_mates =
+            white_reply.found_move &&
+            delivers_checkmate(board, white_reply.best_move);
+        board.undo_move(result.best_move, captured);
+        unit_check(!white_mates,
+                   "search: avoids allowing an immediate checkmate");
+    }
+    {
+        Board board;
+        board.set_from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
+        const SearchResult result = find_best_move(board, 1);
+        unit_check(!result.found_move, "search: stalemate returns no move");
+        unit_check(result.score == 0, "search: stalemate score is 0");
+    }
+    {
+        Board checkmate;
+        checkmate.set_from_fen(
+            "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 3");
+        const SearchResult mate_at_root = find_best_move(checkmate, 0);
+        unit_check(!mate_at_root.found_move && mate_at_root.score == -MATE_SCORE,
+                   "search: checkmate at depth 0 is not a normal eval");
+
+        Board stalemate;
+        stalemate.set_from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
+        const SearchResult stale_at_root = find_best_move(stalemate, 0);
+        unit_check(!stale_at_root.found_move && stale_at_root.score == 0,
+                   "search: stalemate at depth 0 is not a normal eval");
+    }
+    {
+        Board board;
+        board.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1");
+        const SearchResult depth1 = find_best_move(board, 1);
+        const SearchResult depth3 = find_best_move(board, 3);
+        unit_check(depth1.found_move && depth3.found_move,
+                   "search: depth 1 and depth 3 both return moves");
+        unit_check(delivers_checkmate(board, depth1.best_move) &&
+                       delivers_checkmate(board, depth3.best_move),
+                   "search: deeper search still finds mate in 1");
+        unit_check(depth3.nodes >= depth1.nodes,
+                   "search: deeper search visits at least as many nodes");
+    }
+    {
+        Board board;
+        board.set_from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w "
+            "KQkq - 0 1");
+        const Snapshot before = take_snapshot(board);
+        const SearchResult result = find_best_move(board, 3);
+        unit_check(result.found_move && move_is_legal(board, result.best_move),
+                   "search: only returns a legal move");
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "search: preserves board after a midgame search");
+    }
+}
+
+void test_zobrist_and_tt() {
+    {
+        Board a;
+        Board b;
+        a.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        b.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        unit_check(compute_zobrist_hash(a) == compute_zobrist_hash(b),
+                   "zobrist: identical positions share a hash");
+    }
+    {
+        Board white;
+        Board black;
+        white.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        black.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+        unit_check(compute_zobrist_hash(white) != compute_zobrist_hash(black),
+                   "zobrist: side to move affects the hash");
+    }
+    {
+        Board with_rights;
+        Board without_rights;
+        with_rights.set_from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        without_rights.set_from_fen("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1");
+        unit_check(compute_zobrist_hash(with_rights) !=
+                       compute_zobrist_hash(without_rights),
+                   "zobrist: castling rights affect the hash");
+    }
+    {
+        Board with_ep;
+        Board without_ep;
+        with_ep.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        without_ep.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - - 0 1");
+        unit_check(compute_zobrist_hash(with_ep) !=
+                       compute_zobrist_hash(without_ep),
+                   "zobrist: legal en passant affects the hash");
+    }
+    {
+        Board board;
+        board.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        const uint64_t before = compute_zobrist_hash(board);
+        const Piece captured = board.get_piece_at(3, 4);
+        board.make_move(parse_move_str("e2e4"));
+        unit_check(compute_zobrist_hash(board) != before,
+                   "zobrist: make_move changes the hash");
+        board.undo_move(parse_move_str("e2e4"), captured);
+        unit_check(compute_zobrist_hash(board) == before,
+                   "zobrist: undo_move restores the original hash");
+    }
+    {
+        Board castle;
+        castle.set_from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        const uint64_t before = compute_zobrist_hash(castle);
+        const Piece captured = castle.get_piece_at(0, 6);
+        castle.make_move(parse_move_str("e1g1"));
+        castle.undo_move(parse_move_str("e1g1"), captured);
+        unit_check(compute_zobrist_hash(castle) == before,
+                   "zobrist: castling make/undo restores the hash");
+
+        Board promo;
+        promo.set_from_fen("8/P7/8/8/8/8/8/4K2k w - - 0 1");
+        const uint64_t promo_before = compute_zobrist_hash(promo);
+        const Piece promo_captured = promo.get_piece_at(7, 0);
+        promo.make_move(parse_move_str("a7a8q"));
+        promo.undo_move(parse_move_str("a7a8q"), promo_captured);
+        unit_check(compute_zobrist_hash(promo) == promo_before,
+                   "zobrist: promotion make/undo restores the hash");
+
+        Board ep;
+        ep.set_from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        const uint64_t ep_before = compute_zobrist_hash(ep);
+        const Piece ep_captured = ep.get_piece_at(5, 3);
+        ep.make_move(parse_move_str("e5d6"));
+        ep.undo_move(parse_move_str("e5d6"), ep_captured);
+        unit_check(compute_zobrist_hash(ep) == ep_before,
+                   "zobrist: en passant make/undo restores the hash");
+    }
+    {
+        Board path_a;
+        Board path_b;
+        path_a.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        path_b.set_from_fen(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        path_a.make_move(parse_move_str("e2e4"));
+        path_a.make_move(parse_move_str("e7e5"));
+        path_a.make_move(parse_move_str("g1f3"));
+        path_b.make_move(parse_move_str("g1f3"));
+        path_b.make_move(parse_move_str("e7e5"));
+        path_b.make_move(parse_move_str("e2e4"));
+        unit_check(compute_zobrist_hash(path_a) == compute_zobrist_hash(path_b),
+                   "zobrist: transpositions through different orders match");
+    }
+    {
+        Board board;
+        board.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1");
+        clear_search_transposition_table();
+        set_search_tt_enabled(false);
+        const SearchResult without_tt = find_best_move(board, 3);
+        clear_search_transposition_table();
+        set_search_tt_enabled(true);
+        const SearchResult with_tt = find_best_move(board, 3);
+        unit_check(without_tt.found_move && with_tt.found_move &&
+                       without_tt.best_move == with_tt.best_move &&
+                       without_tt.score == with_tt.score,
+                   "tt: mate search matches with TT on or off");
+        set_search_tt_enabled(true);
+    }
+    {
+        Board board;
+        board.set_from_fen("k7/8/1K6/8/8/8/8/1R6 w - - 0 1");
+        clear_search_transposition_table();
+        set_search_tt_enabled(false);
+        const SearchResult without_tt = find_best_move(board, 4);
+        clear_search_transposition_table();
+        set_search_tt_enabled(true);
+        const SearchResult with_tt = find_best_move(board, 4);
+        unit_check(without_tt.score == with_tt.score &&
+                       without_tt.score == MATE_SCORE - 3,
+                   "tt: mate distance score is preserved with TT");
+        set_search_tt_enabled(true);
+    }
+    {
+        Board board;
+        board.set_from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w "
+            "KQkq - 0 1");
+        clear_search_transposition_table();
+        set_search_tt_enabled(true);
+        const Snapshot before = take_snapshot(board);
+        const SearchResult cold = find_best_move(board, 4);
+        unit_check(snapshot_equal(take_snapshot(board), before),
+                   "tt: board preserved after searching");
+        const SearchResult warm = find_best_move(board, 4);
+        unit_check(cold.found_move && warm.found_move &&
+                       cold.best_move == warm.best_move &&
+                       cold.score == warm.score,
+                   "tt: warm cache repeats the same result");
+        unit_check(warm.nodes <= cold.nodes,
+                   "tt: warm cache searches no more nodes than cold");
+        unit_check(warm.tt_hits > 0, "tt: warm cache records table hits");
+    }
+    {
+        Board board;
+        board.set_from_fen("4k3/8/8/3n4/2B5/8/8/4K3 w - - 0 1");
+        clear_search_transposition_table();
+        set_search_tt_enabled(false);
+        const SearchResult without_tt = find_best_move(board, 4);
+        clear_search_transposition_table();
+        set_search_tt_enabled(true);
+        const SearchResult with_tt = find_best_move(board, 4);
+        unit_check(without_tt.best_move == with_tt.best_move &&
+                       without_tt.score == with_tt.score,
+                   "tt: tactical score matches with TT on or off");
+        set_search_tt_enabled(true);
+    }
+}
+
 int run_unit_tests() {
     unit_failures = 0;
     cout << "Unit tests (make/undo state restoration):\n";
@@ -598,7 +1266,14 @@ int run_unit_tests() {
     test_castling_rights_revoked_on_rook_and_king_moves();
     test_promotions();
     test_default_board_initialization();
+    test_evaluation();
     test_checkmate_and_stalemate();
+    test_search();
+    test_quiescence();
+    test_alpha_beta_matches_reference();
+    test_eval_material_dominates_pst();
+    test_tactics();
+    test_zobrist_and_tt();
     cout << "Unit tests: " << (unit_failures == 0 ? "all passed" : "FAILURES")
          << " (" << unit_failures << " failed)\n\n";
     return unit_failures == 0 ? 0 : 1;

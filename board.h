@@ -153,7 +153,7 @@ public:
     vector<Move> generate_pseudo_legal_moves(Color color);
 
     BoardState get_current_board_state();
-    Color get_color();
+    Color get_color() const;
 
     size_t get_turn_index();
     void set_turn_index(size_t index);

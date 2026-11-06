@@ -1132,10 +1132,6 @@ void Board::generate_queen_moves(uint64_t queens, Color color, std::vector<Move>
         // 1) Using the built-in magic Bits Queen() method:
         uint64_t attack_mask = magicAttacks.Queen(occupancy, from_sq);
 
-        // 2) Alternatively, compute bishop + rook attacks:
-        // uint64_t attack_mask = s_magicAttacks.Bishop(occupancy, from_sq) 
-        //                      | s_magicAttacks.Rook(occupancy, from_sq);
-
         uint64_t valid_moves = attack_mask & ~friendlies;
 
         // Turn each set bit into a legal move
@@ -1819,7 +1815,7 @@ void Board::print_position() {
 }
 
 
-Color Board::get_color() {
+Color Board::get_color() const {
     if ((turn_index % 2) == 0) 
         return Color::WHITE;
     else 

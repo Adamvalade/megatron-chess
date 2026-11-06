@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+
+  <head>
+    <title>Megatron</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="chess.min.js"></script>
+    <script src="chessboard.js"></script>
+    <link rel="stylesheet" href="chessboard.css" />
+    
+    <link rel="preload" as="image" href="chesspieces/pieces/wP.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/wR.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/wN.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/wB.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/wQ.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/wK.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/bP.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/bR.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/bN.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/bB.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/bQ.png">
+    <link rel="preload" as="image" href="chesspieces/pieces/bK.png">
+
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-1317X40EDV"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-1317X40EDV');
+    </script>
+  </head>
+
+  <body>
+    <div id="header">
+      <h1>Megatron</h1>
+      <p id="subtitle">Chess engine built by Adam Valade, CS student at the University of Michigan</p>
+    </div>
+    <div class="board-center-wrap">
+      <aside id="moves-panel">
+        <div class="moves-header">Moves</div>
+        <ol id="moves-list" class="moves-list"></ol>
+      </aside>
+      <div id="board"></div>
+    </div>
+        <div id="controls">
+          <div id="engine-side-select">
+            <label for="sideSelect" id="side-label">Megatron plays:</label>
+            <select id="sideSelect">
+              <option value="white">White</option>
+              <option value="black" selected>Black</option>
+            </select>
+          </div>
+        <button onclick="resetGame()">Reset</button>
+      </div>
+    </div>
+    <script src="app.js"></script> 
+    <div id="invisible">
+      <label id="difficulty">5</label>
+    </div>
+    <div id="highlight-overlay">
+      <h2 id="highlight-text">MEGATRON WINS</h2>
+      <video id="highlight-video" autoplay muted playsinline>
+        <source src="videos/win.mp4" type="video/mp4">
+        Your browser does not support the video tag.
+      </video>
+    </div>
+    <div id="loser-overlay">
+      <h2 id="highlight-text">MEGATRON LOSES</h2>
+      <video id="highlight-video" autoplay muted playsinline>
+        <source src="videos/lose.mp4" type="video/mp4">
+        Your browser does not support the video tag.
+      </video>
+    </div>
+    <div id="draw-overlay">
+      <h2 id="highlight-text">MEGATRON DRAWS</h2>
+      <video id="highlight-video" autoplay muted playsinline>
+        <source src="videos/lose.mp4" type="video/mp4">
+        Your browser does not support the video tag.
+      </video>
+    </div>
+    <div id="promotion-modal" style="display: none;" class="promotion-menu"></div>
+  </body>
+</html>
