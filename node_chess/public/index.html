@@ -1,87 +1,85 @@
 <!doctype html>
-<html>
-
+<html lang="en">
   <head>
-    <title>Megatron</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Megatron Chess</title>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="chess.min.js"></script>
     <script src="chessboard.js"></script>
     <link rel="stylesheet" href="chessboard.css" />
-    
-    <link rel="preload" as="image" href="chesspieces/pieces/wP.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/wR.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/wN.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/wB.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/wQ.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/wK.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/bP.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/bR.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/bN.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/bB.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/bQ.png">
-    <link rel="preload" as="image" href="chesspieces/pieces/bK.png">
-
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-1317X40EDV"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-
-      gtag('config', 'G-1317X40EDV');
-    </script>
+    <link rel="stylesheet" href="site.css" />
+    <link rel="preload" as="image" href="chesspieces/pieces/wP.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/wR.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/wN.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/wB.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/wQ.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/wK.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/bP.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/bR.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/bN.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/bB.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/bQ.png" />
+    <link rel="preload" as="image" href="chesspieces/pieces/bK.png" />
   </head>
-
   <body>
-    <div id="header">
-      <h1>Megatron</h1>
-      <p id="subtitle">Chess engine built by Adam Valade, CS student at the University of Michigan</p>
-    </div>
-    <div class="board-center-wrap">
-      <aside id="moves-panel">
-        <div class="moves-header">Moves</div>
-        <ol id="moves-list" class="moves-list"></ol>
-      </aside>
-      <div id="board"></div>
-    </div>
-        <div id="controls">
-          <div id="engine-side-select">
-            <label for="sideSelect" id="side-label">Megatron plays:</label>
-            <select id="sideSelect">
-              <option value="white">White</option>
-              <option value="black" selected>Black</option>
-            </select>
+    <div class="page">
+      <header class="hero">
+        <p class="eyebrow">C++ Chess Engine</p>
+        <h1>Megatron</h1>
+        <p class="tagline">
+          Play against a UCI chess engine built by Adam Valade.
+        </p>
+      </header>
+
+      <main class="layout">
+        <section class="board-panel">
+          <div id="board"></div>
+          <div id="status" class="status">White to move</div>
+          <div id="thinking" class="thinking" hidden>Megatron is thinking…</div>
+          <div id="error" class="error" hidden></div>
+        </section>
+
+        <aside class="side-panel">
+          <div class="card">
+            <h2>Game</h2>
+            <label class="field">
+              <span>Megatron plays</span>
+              <select id="sideSelect">
+                <option value="black" selected>Black</option>
+                <option value="white">White</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Difficulty (search depth)</span>
+              <select id="depthSelect">
+                <option value="2">2 — Fast</option>
+                <option value="3">3 — Easy</option>
+                <option value="4" selected>4 — Standard</option>
+                <option value="5">5 — Stronger</option>
+                <option value="6">6 — Slow</option>
+              </select>
+            </label>
+            <button id="resetButton" type="button">New Game</button>
           </div>
-        <button onclick="resetGame()">Reset</button>
+
+          <div class="card">
+            <h2>Moves</h2>
+            <ol id="moves-list" class="moves-list"></ol>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <div id="game-over" class="game-over" hidden>
+      <div class="game-over-card">
+        <h2 id="game-over-title">Game Over</h2>
+        <p id="game-over-message"></p>
+        <button id="gameOverReset" type="button">Play Again</button>
       </div>
     </div>
-    <script src="app.js"></script> 
-    <div id="invisible">
-      <label id="difficulty">5</label>
-    </div>
-    <div id="highlight-overlay">
-      <h2 id="highlight-text">MEGATRON WINS</h2>
-      <video id="highlight-video" autoplay muted playsinline>
-        <source src="videos/win.mp4" type="video/mp4">
-        Your browser does not support the video tag.
-      </video>
-    </div>
-    <div id="loser-overlay">
-      <h2 id="highlight-text">MEGATRON LOSES</h2>
-      <video id="highlight-video" autoplay muted playsinline>
-        <source src="videos/lose.mp4" type="video/mp4">
-        Your browser does not support the video tag.
-      </video>
-    </div>
-    <div id="draw-overlay">
-      <h2 id="highlight-text">MEGATRON DRAWS</h2>
-      <video id="highlight-video" autoplay muted playsinline>
-        <source src="videos/lose.mp4" type="video/mp4">
-        Your browser does not support the video tag.
-      </video>
-    </div>
-    <div id="promotion-modal" style="display: none;" class="promotion-menu"></div>
+
+    <div id="promotion-modal" class="promotion-menu" hidden></div>
+    <script src="app.js"></script>
   </body>
 </html>
