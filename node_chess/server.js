@@ -8,7 +8,9 @@ const PORT = process.env.PORT || 3000;
 const ENGINE_PATH =
   process.env.ENGINE_PATH || path.join(__dirname, "..", "engine");
 const DEFAULT_DEPTH = Number(process.env.ENGINE_DEPTH || 4);
-const MOVE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS || 60000);
+const MIN_DEPTH = 1;
+const MAX_DEPTH = Number(process.env.ENGINE_MAX_DEPTH || 8);
+const MOVE_TIMEOUT_MS = Number(process.env.ENGINE_TIMEOUT_MS || 600000);
 
 app.use(express.json({ limit: "32kb" }));
 app.use(
@@ -66,18 +68,28 @@ function parseDepth(body) {
   if (!Number.isFinite(raw)) {
     return DEFAULT_DEPTH;
   }
-  return Math.max(1, Math.min(8, Math.floor(raw)));
+  return Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.floor(raw)));
+}
+
+function timeoutForDepth(depth) {
+  const scaled = depth * 60000;
+  return Math.max(MOVE_TIMEOUT_MS, scaled);
 }
 
 function isValidUciMoveToken(token) {
   return /^[a-h][1-8][a-h][1-8][qrbn]?$/i.test(token);
 }
 
-function askEngine(moves, depth) {
+function askEngine(moves, depth, signal) {
   return new Promise((resolve, reject) => {
     const enginePath = resolveEnginePath();
     if (!enginePath) {
       reject(new Error("Megatron executable not found"));
+      return;
+    }
+
+    if (signal && signal.aborted) {
+      reject(new Error("Engine request cancelled"));
       return;
     }
 
@@ -88,8 +100,18 @@ function askEngine(moves, depth) {
     let buffer = "";
     let settled = false;
     const timer = setTimeout(() => {
-      finish(new Error("Engine timed out"));
-    }, MOVE_TIMEOUT_MS);
+      finish(
+        new Error(
+          "Engine timed out at depth " +
+            depth +
+            ". Try a lower search depth."
+        )
+      );
+    }, timeoutForDepth(depth));
+
+    function onAbort() {
+      finish(new Error("Engine request cancelled"));
+    }
 
     function finish(error, value) {
       if (settled) {
@@ -97,6 +119,9 @@ function askEngine(moves, depth) {
       }
       settled = true;
       clearTimeout(timer);
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
       try {
         engine.kill("SIGKILL");
       } catch (_) {}
@@ -105,6 +130,10 @@ function askEngine(moves, depth) {
       } else {
         resolve(value);
       }
+    }
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort);
     }
 
     engine.on("error", (error) => {
@@ -178,6 +207,14 @@ async function handleMoveRequest(req, res) {
   }
   inFlight.add(key);
 
+  const abortController = new AbortController();
+  const onClientGone = () => {
+    if (!res.writableEnded) {
+      abortController.abort();
+    }
+  };
+  res.on("close", onClientGone);
+
   try {
     const moves = normalizeMoves(req.body);
     for (const move of moves) {
@@ -188,17 +225,24 @@ async function handleMoveRequest(req, res) {
     }
 
     const depth = parseDepth(req.body);
-    const result = await askEngine(moves, depth);
+    const result = await askEngine(moves, depth, abortController.signal);
     res.json({
       bestmove: result.bestmove,
       raw: result.raw,
       depth,
     });
   } catch (error) {
-    res.status(500).json({
-      error: error && error.message ? error.message : "Engine failure",
-    });
+    const message =
+      error && error.message ? error.message : "Engine failure";
+    if (message === "Engine request cancelled") {
+      if (!res.headersSent) {
+        res.status(499).json({ error: message });
+      }
+      return;
+    }
+    res.status(500).json({ error: message });
   } finally {
+    res.off("close", onClientGone);
     inFlight.delete(key);
   }
 }

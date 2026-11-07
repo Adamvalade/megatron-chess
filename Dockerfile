@@ -1,5 +1,3 @@
-FROM node:20-bookworm AS web
-
 FROM gcc:13-bookworm AS engine-build
 WORKDIR /src
 COPY Makefile Piece.cpp Piece.h board.cpp board.h engine.cpp engine.h eval.cpp eval.h search.cpp search.h tt.cpp tt.h uci.cpp uci.h zobrist.cpp zobrist.h magic.h pstTables.h utilities.h tests.h ./
@@ -14,6 +12,6 @@ WORKDIR /app/node_chess
 RUN npm ci --omit=dev
 COPY node_chess/ ./
 ENV ENGINE_PATH=/app/engine
-ENV PORT=3000
+ENV NODE_ENV=production
 EXPOSE 3000
 CMD ["node", "server.js"]

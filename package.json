@@ -1,0 +1,15 @@
+{
+  "name": "megatron-chess",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Megatron Chess — C++ UCI engine with Node.js web frontend",
+  "scripts": {
+    "start": "node node_chess/server.js",
+    "heroku-postbuild": "bash scripts/heroku-build.sh",
+    "build:engine": "make release",
+    "test:engine": "make release && ./test_uci.sh && ./test_perft --unit"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}
