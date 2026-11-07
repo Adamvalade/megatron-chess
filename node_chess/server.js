@@ -31,10 +31,8 @@ function sessionKey(req) {
 }
 
 function resolveEnginePath() {
-  if (fs.existsSync(ENGINE_PATH) && fs.statSync(ENGINE_PATH).isFile()) {
-    return ENGINE_PATH;
-  }
   const candidates = [
+    path.resolve(ENGINE_PATH),
     path.join(__dirname, "..", "engine"),
     path.join(__dirname, "bin", "megatron"),
     path.join(__dirname, "megatron"),
