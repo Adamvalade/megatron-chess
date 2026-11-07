@@ -19,13 +19,11 @@ class Timer {
         bool running = false;
 
     public:
-        // Start the timer
         void start() {
             start_time = std::chrono::high_resolution_clock::now();
             running = true;
         }
 
-        // Stop the timer
         void stop() {
             if (!running) {
                 std::cerr << "Timer was not running!" << std::endl;
@@ -35,13 +33,11 @@ class Timer {
             running = false;
         }
 
-        // Get elapsed time in milliseconds
         double timeMs() const {
             auto end = running ? std::chrono::high_resolution_clock::now() : end_time;
             return std::chrono::duration<double, std::milli>(end - start_time).count();
         }
 
-        // Get elapsed time in seconds
         double timeS() const {
             auto end = running ? std::chrono::high_resolution_clock::now() : end_time;
             return std::chrono::duration<double>(end - start_time).count();

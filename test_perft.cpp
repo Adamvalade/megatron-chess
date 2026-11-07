@@ -1,22 +1,14 @@
-// standard ChessProgrammingWiki perft suite:
-//   https://www.chessprogramming.org/Perft_Results
+// ChessProgrammingWiki perft suite: https://www.chessprogramming.org/Perft_Results
 //
 // Usage:
-//   ./test_perft                     run the suite (with undo checks)
-//   ./test_perft --max-depth N       only test depths <= N
-//   ./test_perft --no-check          skip make/undo round-trip checks
-//   ./test_perft --divide D INDEX    per-root-move counts for position INDEX
-//                                    (0-based, in the order listed below)
+//   ./test_perft
+//   ./test_perft --max-depth N
+//   ./test_perft --no-check
+//   ./test_perft --divide D INDEX
+//   ./test_perft --unit
 //
-// Exit status: 0 if every perft comparison (and undo check, if enabled)
-// passes, 1 otherwise. Known-failing positions are intentional: they are
-// preserved as evidence of existing bugs and must NOT be edited away here.
-//
-// Focused unit tests for specific make/undo state-restoration bugs live in
-// run_unit_tests() below; run them alone with --unit. They are regression
-// tests: each one failed before the fix it guards.
-//
-// Build: make test_perft   (uses the Makefile's existing test* machinery)
+// Known-failing positions are left in on purpose (don't "fix" them here).
+// Build: make test_perft
 
 #include <chrono>
 #include <cstdint>
@@ -40,11 +32,10 @@ namespace {
 struct Position {
     const char * name;
     const char * fen;
-    // (depth, expected leaf-node count) pairs, shallow to deep.
+    // depth -> expected nodes
     vector<pair<int, uint64_t>> depths;
 };
 
-// Standard ChessProgrammingWiki perft suite.
 const vector<Position> POSITIONS = {
     {"startpos",
      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -66,9 +57,7 @@ const vector<Position> POSITIONS = {
      {{1, 46}, {2, 2079}, {3, 89890}, {4, 3894594}}},
 };
 
-// ---------------------------------------------------------------------------
 // Make/undo round-trip checking
-// ---------------------------------------------------------------------------
 
 struct UndoCheck {
     bool enabled = true;
@@ -83,10 +72,7 @@ struct UndoCheck {
     uint64_t reported_board = 0; // board-corrupting examples shown
 };
 
-// Everything undo_move() is supposed to restore. BoardState covers the 12
-// piece bitboards, castling rights and the en-passant square; the FEN
-// placement string additionally covers the redundant 8x8 board array, and
-// turn_index covers side-to-move bookkeeping.
+// Snapshot of everything undo_move() should restore.
 struct Snapshot {
     BoardState state;
     string placement;
@@ -106,8 +92,7 @@ string move_to_string(const Move &m) {
     s += static_cast<char>('1' + m.start_rank);
     s += static_cast<char>('a' + m.end_file);
     s += static_cast<char>('1' + m.end_rank);
-    // UCI-style promotion suffix, so divide output and move comparisons
-    // distinguish the four promotion choices (a7a8q vs a7a8n, ...).
+    // Include promotion suffix so a7a8q vs a7a8n stay distinct.
     switch (m.promotion) {
         case PieceType::QUEEN:  s += 'q'; break;
         case PieceType::ROOK:   s += 'r'; break;
@@ -182,9 +167,7 @@ void check_round_trip(Board &board, const Snapshot &before, const Move &m,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Perft
-// ---------------------------------------------------------------------------
 
 uint64_t perft(Board &board, int depth, Color side, UndoCheck &check) {
     if (depth == 0) {
@@ -196,8 +179,7 @@ uint64_t perft(Board &board, int depth, Color side, UndoCheck &check) {
 
     uint64_t nodes = 0;
     for (const Move &m : moves) {
-        // get_piece_at returns a reference into the board: copy it before
-        // make_move mutates the board.
+        // Copy before make_move — get_piece_at returns a board reference.
         const Piece captured = board.get_piece_at(m.end_rank, m.end_file);
         Snapshot before{};
         if (check.enabled) {
@@ -213,9 +195,7 @@ uint64_t perft(Board &board, int depth, Color side, UndoCheck &check) {
     return nodes;
 }
 
-// ---------------------------------------------------------------------------
 // Focused unit tests (regression tests for specific fixed bugs)
-// ---------------------------------------------------------------------------
 
 Move parse_move_str(const char *s) {
     Move m{s[0] - 'a', s[1] - '1', s[2] - 'a', s[3] - '1'};
@@ -236,7 +216,7 @@ bool snapshot_equal(const Snapshot &a, const Snapshot &b) {
            a.turn_index == b.turn_index;
 }
 
-// Apply a move exactly as perft does (copy the captured piece first).
+// Same make path as perft (copy the capture first).
 Piece apply(Board &board, const char *move_str) {
     const Move m = parse_move_str(move_str);
     const Piece captured = board.get_piece_at(m.end_rank, m.end_file);
@@ -421,14 +401,7 @@ void test_castling_rights_revoked_on_rook_and_king_moves() {
                "castling rights restored after undoing Ke1e2");
 }
 
-// ---------------------------------------------------------------------------
-// Promotion tests. Each legal promotion (quiet or capture, either color)
-// must be generated as four distinct moves, make_move must create the
-// chosen piece, and undo_move must restore the pawn and any captured
-// piece. These tests use only generated Move objects, so they compile
-// against a Move type with or without a promotion field -- and fail at
-// runtime until all four choices are actually generated and executed.
-// ---------------------------------------------------------------------------
+// Promotion: four distinct moves, make creates the piece, undo restores the pawn.
 
 vector<Move> generated_moves(Board &board, const char *from_to) {
     const Move target = parse_move_str(from_to);
@@ -444,9 +417,7 @@ vector<Move> generated_moves(Board &board, const char *from_to) {
     return result;
 }
 
-// Make each candidate move in turn: the four promotion choices must
-// produce four distinct displayed moves and all four piece types, and
-// every make must undo back to the exact starting snapshot.
+// Each promotion choice must display differently and undo cleanly.
 void check_promotion_choices(Board &board, const char *from_to,
                              const char *label) {
     const Snapshot before = take_snapshot(board);
@@ -585,8 +556,7 @@ void test_checkmate_and_stalemate() {
 }
 
 // ---------------------------------------------------------------------------
-// Static evaluation tests (R6). Scores are centipawns from the side to
-// move's perspective.
+// Eval tests (side-to-move centipawns).
 // ---------------------------------------------------------------------------
 
 void test_evaluation() {
@@ -1380,9 +1350,7 @@ int run_suite(int max_depth, UndoCheck &check) {
                 continue;
             }
 
-            // A fresh Board per (position, depth): if one run corrupts
-            // state or throws (e.g. Error from generate_legal_moves), the
-            // remaining cases still run and report.
+            // Fresh board per case so one failure doesn't poison the rest.
             try {
                 const uint64_t got =
                     perft(board, depth, board.get_color(), check);

@@ -5,7 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_set>
-#include <functional> // For hash
+#include <functional>
 #include <cstddef>
 #include <stack>
 #include <sstream>
@@ -16,8 +16,8 @@
 
 using namespace std;
 
-const uint64_t FILE_A = 0x0101010101010101ULL; // The A file (left-most)
-const uint64_t FILE_H = 0x8080808080808080ULL; // The H file (right-most)
+const uint64_t FILE_A = 0x0101010101010101ULL;
+const uint64_t FILE_H = 0x8080808080808080ULL;
 
 
 static constexpr uint16_t WHITE_KINGSIDE  = 1 << 0;
@@ -28,11 +28,7 @@ static constexpr uint16_t BLACK_QUEENSIDE = 1 << 3;
 struct Move {
     int start_file, start_rank;
     int end_file, end_rank;
-    // Promotion choice for pawn moves to the last rank; PieceType::NONE
-    // for all other moves. Defaulted so existing Move{file, rank, file,
-    // rank} constructions keep working (make_move treats NONE on the
-    // last rank as "queen", preserving historical behavior for
-    // hand-built moves).
+    // NONE on a last-rank pawn move still means queen (legacy Move construction).
     PieceType promotion = PieceType::NONE;
 
     bool operator==(const Move &other) const {
@@ -48,8 +44,8 @@ struct Move {
 struct BoardState {
     uint64_t white_pawns, white_knights, white_bishops, white_rooks, white_queens, white_kings;
     uint64_t black_pawns, black_knights, black_bishops, black_rooks, black_queens, black_kings;
-    uint16_t castling_rights; // 4 bits to represent castling (KQkq)
-    int en_passant_square; // 0-63 for a valid square, or 64 if none
+    uint16_t castling_rights;
+    int en_passant_square; // 64 = none
 
     bool operator==(const BoardState &other) const {
         return white_pawns == other.white_pawns &&
@@ -74,7 +70,6 @@ struct BoardStateHasher {
     std::size_t operator()(const BoardState& state) const {
         std::size_t hash = 0;
 
-        // Combine hashes for all bitboards
         hash ^= std::hash<uint64_t>()(state.white_pawns) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<uint64_t>()(state.white_knights) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<uint64_t>()(state.white_bishops) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
@@ -88,7 +83,6 @@ struct BoardStateHasher {
         hash ^= std::hash<uint64_t>()(state.black_queens) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<uint64_t>()(state.black_kings) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
 
-        // Combine hashes for castling rights and en passant square
         hash ^= std::hash<uint16_t>()(state.castling_rights) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
         hash ^= std::hash<int>()(state.en_passant_square) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
 
@@ -108,8 +102,8 @@ public:
 
     Board();
 
-    void generate_board();  // Initialize the board using bitboards
-    void display();  // Display the current board
+    void generate_board();
+    void display();
     void print_position();
     BoardState track_position();
     void compute_attack_masks();
@@ -126,7 +120,6 @@ public:
     void init();
     void clear();
     
-    // Bitboard-specific methods
     uint64_t get_bitboard(PieceType type, Color color) const;
     uint64_t generate_knight_attack_mask(uint64_t knight_pos);
     uint64_t generate_king_attack_mask(uint64_t king_pos);
@@ -171,12 +164,11 @@ public:
     void generate_king_moves(uint64_t kings, Color color, vector<Move> & moves, bool double_check);
     uint64_t get_between_squares(int from_sq, int to_sq) const;
     bool is_sliding_piece(PieceType type) const;
-    bool set_from_fen(const string & fen); // necessary for UCI
+    bool set_from_fen(const string & fen);
     string to_fen() const;
 
 
 private:
-    // Bitboards for each piece type and color
     uint64_t white_pawns;
     uint64_t black_pawns;
     uint64_t white_knights;
@@ -192,9 +184,9 @@ private:
     uint64_t all_white_pieces;
     uint64_t all_black_pieces;
     uint64_t all_pieces;
-    uint64_t white_attacks;  // Squares attacked by White
-    uint64_t black_attacks;  // Squares attacked by Black
-    uint64_t pinned_pieces;  // Bitboard of currently moving side's pinned pieces
+    uint64_t white_attacks;
+    uint64_t black_attacks;
+    uint64_t pinned_pieces;
     
 
     uint64_t KNIGHT_ATTACKS[64];
@@ -217,31 +209,21 @@ private:
     vector<vector<Piece>> board;
     unordered_set<BoardState, BoardStateHasher> visited_states;
 
-    uint64_t pin_line[64];   // For each pinned piece's square, the mask of allowed moves
+    uint64_t pin_line[64];
 
     stack<int> en_passant_stack;
     stack<int> promotion_stack;
     stack<bool> castling_stack;
-    stack<uint16_t> castling_rights_stack; // rights before each made move
+    stack<uint16_t> castling_rights_stack;
 
-    magic_bits::Attacks magicAttacks; // Instance for magic bitboard attacks
+    magic_bits::Attacks magicAttacks;
     uint16_t castling_rights = 0;
 
     size_t turn_index = 0;
 };
 
 
-// Castling rights bitmask:
-//
-// bit 0 (0b0001): White kingside  - K
-// bit 1 (0b0010): White queenside - Q
-// bit 2 (0b0100): Black kingside  - k
-// bit 3 (0b1000): Black queenside - q
-//
-// Multiple rights can coexist, e.g.
-// 0b1111 = KQkq
-// 0b0101 = Kk
-// 0b0000 = no castling rights
+// Castling rights: bit0 WK, bit1 WQ, bit2 BK, bit3 BQ.
 
 
 

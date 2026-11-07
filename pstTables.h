@@ -31,7 +31,7 @@ static const int KING_MIDGAME[8][8] = {
   {  200,  320,  180, -30, -30,  150,  350,  220 }
 };
 
-// -- Endgame King PST (White) => Encourages king to be active/center
+// Endgame king: prefer central activity
 static const int KING_ENDGAME[8][8] = {
   { -500,-400,-300,-200,-200,-300,-400,-500 },
   { -300,-200,-100,  0,  0,-100,-200,-300 },
