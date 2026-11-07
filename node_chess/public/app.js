@@ -1,563 +1,805 @@
 window.board = null;
 window.game = null;
+window.isThinking = false;
 
-let engineSide = 'black';
+const MIN_DEPTH = 1;
+const MAX_DEPTH = 8;
+const DEFAULT_DEPTH = 4;
+const MOVE_ANIMATION_MS = 250;
+const WIN_CELEBRATION_DELAY_MS = 1000;
 
-const $status = $('#status');
-const $fen = $('#fen');
-const $pgn = $('#pgn');
+let engineSide = "black";
+let searchDepth = DEFAULT_DEPTH;
+let pendingPromotion = null;
+let moveRequestId = 0;
+let activeMoveController = null;
+let pendingAnimationResolve = null;
+let celebrationToken = 0;
+let celebrationTimer = null;
+let selectedSquare = null;
+let ignoreBoardClickUntil = 0;
+let afterSnapHandler = null;
 
+const statusEl = document.getElementById("status");
+const thinkingEl = document.getElementById("thinking");
+const thinkingDepthEl = document.getElementById("thinkingDepth");
+const errorEl = document.getElementById("error");
+const movesList = document.getElementById("moves-list");
+const gameOverEl = document.getElementById("game-over");
+const gameOverTitle = document.getElementById("game-over-title");
+const gameOverMessage = document.getElementById("game-over-message");
+const resultVideo = document.getElementById("result-highlight-video");
+const megatronWinsEl = document.getElementById("megatron-wins");
+const winVideo = document.getElementById("win-highlight-video");
+const resetButton = document.getElementById("resetButton");
+const gameOverReset = document.getElementById("gameOverReset");
+const dismissWins = document.getElementById("dismissWins");
+const winsPlayAgain = document.getElementById("winsPlayAgain");
+const sideSelect = document.getElementById("sideSelect");
+const depthSlider = document.getElementById("depthSlider");
+const depthValue = document.getElementById("depthValue");
+const depthRecommended = document.getElementById("depthRecommended");
+const promotionModal = document.getElementById("promotion-modal");
+const boardEl = document.getElementById("board");
+const aboutButton = document.getElementById("aboutButton");
+const aboutModal = document.getElementById("about-modal");
+const aboutClose = document.getElementById("aboutClose");
+const aboutCard = aboutModal.querySelector(".about-modal-card");
 
-document.addEventListener('touchstart', () => {}, { passive: false });
-document.addEventListener('contextmenu', (e) => {
-  if (e.target.nodeName === 'IMG') e.preventDefault();
-}, false);
+let aboutOpen = false;
+let aboutLastFocus = null;
 
-
-function updateColor() {
-  engineSide = document.getElementById('sideSelect').value;
+function prefersReducedMotion() {
+  return (
+    window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
-
-function updateDifficultyLabel() {
-  document.getElementById('difficultyValue').innerText =
-    document.getElementById('difficulty').value;
-}
-
-
-function makeEngineMoveIfNeeded() {
-  if (game.game_over()) {
-    console.log('Game over (no further engine moves)');
-    return;
+function clampDepth(value) {
+  const depth = Number(value);
+  if (!Number.isFinite(depth)) {
+    return DEFAULT_DEPTH;
   }
-  const turn = game.turn();
-  if (engineSide === 'both') {
-    callEngineAndMove();
-  } else if (engineSide === 'white' && turn === 'w') {
-    callEngineAndMove();
-  } else if (engineSide === 'black' && turn === 'b') {
-    callEngineAndMove();
+  return Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.floor(depth)));
+}
+
+function syncDepthDisplay(depth) {
+  searchDepth = clampDepth(depth);
+  depthSlider.value = String(searchDepth);
+  depthSlider.setAttribute("aria-valuenow", String(searchDepth));
+  depthValue.textContent = String(searchDepth);
+  thinkingDepthEl.textContent = String(searchDepth);
+  depthRecommended.hidden = searchDepth !== DEFAULT_DEPTH;
+}
+
+function cancelActiveMoveRequest() {
+  moveRequestId += 1;
+  if (activeMoveController) {
+    activeMoveController.abort();
+    activeMoveController = null;
   }
 }
 
-
-function renderMoves() {
-  const list = document.getElementById('moves-list');
-  if (!list) return;
-
-  // Get SAN with move numbers
-  const verbose = window.game.history({ verbose: true });
-
-  // Build rows as pairs: one white SAN, one black SAN
-  // Each object includes san + ply index (0-based half-move index)
-  const pairs = [];
-  for (let i = 0; i < verbose.length; i += 2) {
-    const white = verbose[i]  ? { san: verbose[i].san,  ply: i }   : null;
-    const black = verbose[i + 1] ? { san: verbose[i + 1].san, ply: i + 1 }: null;
-    pairs.push({ index: Math.floor(i / 2) + 1, white, black });
+function cancelCelebration() {
+  celebrationToken += 1;
+  if (celebrationTimer !== null) {
+    clearTimeout(celebrationTimer);
+    celebrationTimer = null;
   }
-
-  // Build DOM
-  const frag = document.createDocumentFragment();
-  pairs.forEach(({ index, white, black }) => {
-    const row = document.createElement('li');
-    row.className = 'move-row';
-
-    const idx = document.createElement('div');
-    idx.className = 'move-index';
-    idx.textContent = index + '.';
-    row.appendChild(idx);
-
-    const w = document.createElement('div');
-    w.className = 'move';
-    w.textContent = white ? white.san : '';
-    if (white) w.dataset.ply = white.ply;
-    row.appendChild(w);
-
-    const b = document.createElement('div');
-    b.className = 'move';
-    b.textContent = black ? black.san : '';
-    if (black) b.dataset.ply = black.ply;
-    row.appendChild(b);
-
-    frag.appendChild(row);
-  });
-
-  list.innerHTML = '';
-  list.appendChild(frag);
-
-  // Auto-scroll to latest
-  list.parentElement.scrollTop = list.parentElement.scrollHeight;
 }
 
-
-function flipSquare(square) {
-  const files = "abcdefgh";
-  const file = square.charAt(0);
-  const rank = square.charAt(1);
-  const flippedFile = files[files.length - 1 - files.indexOf(file)];
-  const flippedRank = (9 - parseInt(rank)).toString();
-  return flippedFile + flippedRank;
-}
-
-function flipMove(move) {
-  if (move.length < 4) return move;
-  return flipSquare(move.slice(0,2)) + flipSquare(move.slice(2,4)) + (move.slice(4) || "");
-}
-
-
-function hardDOMCleanup() {
-  const ghostDiv = document.createElement('div');
-  document.body.appendChild(ghostDiv);
-  ghostDiv.offsetHeight; // force reflow
-  document.body.removeChild(ghostDiv);
-}
-
-
-function callEngineAndMove() {
-
-  if (window.isThinking) return;
-
-  window.isThinking = true; 
-
-  const localTurn = game.turn();
-  const localSide = engineSide;
-  let localShouldFlip = (localSide === 'black' && localTurn === 'b');
-
-  let moves = game.history({ verbose: true })
-    .map(m => m.from + m.to + (m.promotion || ''));
-
-  if (localShouldFlip) {
-    moves = moves.map(move => flipMove(move));
+function clearSquareSelection() {
+  const selected = boardEl.querySelectorAll(".is-selected");
+  for (let i = 0; i < selected.length; i += 1) {
+    selected[i].classList.remove("is-selected");
   }
+  selectedSquare = null;
+}
 
-  console.log("Sending to engine:", moves);
+function setThinking(isThinking) {
+  window.isThinking = isThinking;
+  thinkingEl.classList.toggle("is-active", isThinking);
+  thinkingEl.setAttribute("aria-hidden", isThinking ? "false" : "true");
+  sideSelect.disabled = isThinking;
+  depthSlider.disabled = isThinking;
+  if (isThinking) {
+    thinkingDepthEl.textContent = String(searchDepth);
+  }
+}
 
-  fetch('/move', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 'moves[]': moves })
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (!data.bestmove) {
-      console.log("No bestmove received");
+function showError(message) {
+  const hasError = Boolean(message);
+  errorEl.classList.toggle("is-active", hasError);
+  errorEl.setAttribute("aria-hidden", hasError ? "false" : "true");
+  errorEl.textContent = message || "";
+}
+
+function stopVideo(video) {
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  video.hidden = true;
+}
+
+function playVideo(video, source) {
+  video.hidden = false;
+  video.src = source;
+  video.currentTime = 0;
+  video.muted = true;
+  const playAttempt = video.play();
+  if (playAttempt && typeof playAttempt.catch === "function") {
+    playAttempt.catch(() => {});
+  }
+}
+
+function hideMegatronWins() {
+  stopVideo(winVideo);
+  megatronWinsEl.hidden = true;
+}
+
+function hideGameOver() {
+  stopVideo(resultVideo);
+  gameOverEl.hidden = true;
+}
+
+function hideAllOverlays() {
+  hideMegatronWins();
+  hideGameOver();
+}
+
+function showMegatronWins() {
+  hideGameOver();
+  megatronWinsEl.hidden = false;
+  playVideo(winVideo, "videos/win.mp4");
+}
+
+function showGameOver(title, message, videoSource) {
+  hideMegatronWins();
+  gameOverTitle.textContent = title;
+  gameOverMessage.textContent = message;
+  gameOverEl.hidden = false;
+  if (videoSource) {
+    playVideo(resultVideo, videoSource);
+  } else {
+    stopVideo(resultVideo);
+  }
+}
+
+function scheduleMegatronWins() {
+  const token = celebrationToken + 1;
+  celebrationToken = token;
+  if (celebrationTimer !== null) {
+    clearTimeout(celebrationTimer);
+  }
+  celebrationTimer = setTimeout(() => {
+    celebrationTimer = null;
+    if (token !== celebrationToken) {
       return;
     }
+    showMegatronWins();
+  }, WIN_CELEBRATION_DELAY_MS);
+}
 
-    let bestmove = data.bestmove;
-    if (localShouldFlip) {
-      bestmove = {
-        from: flipSquare(bestmove.from),
-        to: flipSquare(bestmove.to),
-        promotion: bestmove.promotion || ''
-      };
-    }
+function currentOrientation() {
+  return engineSide === "white" ? "black" : "white";
+}
 
-    console.log('Got engine move:', bestmove);
-    window.game.move(bestmove);
-    requestAnimationFrame(() => {
-      window.board.position(window.game.fen());
-    });
-    updateStatus();
-
-  })
-  .catch(err => {
-    console.error("Error in POST /move:", err);
-  })
-  .finally(() => {
-    window.isThinking = false;
+function collectUciMoves() {
+  return window.game.history({ verbose: true }).map((move) => {
+    return move.from + move.to + (move.promotion || "");
   });
 }
 
+function renderMoves() {
+  const history = window.game.history({ verbose: true });
+  const fragment = document.createDocumentFragment();
 
-function onDragStart(piece) {
-  if (window.game.game_over()) return false;
-  if (window.isThinking) return false;
+  for (let index = 0; index < history.length; index += 2) {
+    const row = document.createElement("li");
+    row.className = "move-row";
 
-  if ((window.game.turn() === 'w' && piece.search(/^b/) !== -1) ||
-      (window.game.turn() === 'b' && piece.search(/^w/) !== -1)) {
-    return false;
-  }
-}
+    const moveNumber = document.createElement("div");
+    moveNumber.className = "move-index";
+    moveNumber.textContent = Math.floor(index / 2) + 1 + ".";
+    row.appendChild(moveNumber);
 
+    const whiteMove = document.createElement("div");
+    whiteMove.textContent = history[index] ? history[index].san : "";
+    row.appendChild(whiteMove);
 
-function handleUserMove(source, target, promotionPiece = '') {
-  const moveResult = window.game.move({
-    from: source,
-    to: target,
-    promotion: promotionPiece
-  });
-  if (!moveResult) {
-    window.isThinking = false;
-    return 'snapback';
+    const blackMove = document.createElement("div");
+    blackMove.textContent = history[index + 1] ? history[index + 1].san : "";
+    row.appendChild(blackMove);
+
+    fragment.appendChild(row);
   }
 
-  requestAnimationFrame(() => {
-    window.board.position(window.game.fen());
-  });
-  
-  updateStatus();
-
-  if (window.game.in_checkmate() || window.game.in_draw()) {
-    const loser = window.game.turn(); 
-    const engineWon = (
-      (engineSide === 'white' && loser === 'b') ||
-      (engineSide === 'black' && loser === 'w') ||
-      (engineSide === 'both') 
-    );
-
-    const engineLost = (
-      (engineSide === 'black' && loser === 'b') ||
-      (engineSide === 'white' && loser === 'w')
-    );
-
-    const overlay = document.getElementById(
-      window.game.in_draw()
-        ? 'draw-overlay'
-        : engineWon
-        ? 'highlight-overlay'
-        : 'loser-overlay'
-    );
-    const video = document.getElementById('highlight-video');
-
-    setTimeout(() => {
-      overlay.style.display = 'flex';
-      video.currentTime = 0;
-      video.muted = true;
-      video.play().then(() => {
-        console.log("video playing")
-      }).catch((err) => {
-        console.error("Autoplay failed:", err);
-      });
-
-      setTimeout(() => {
-        overlay.style.display = 'none';
-      }, 10000);
-
-      video.onended = () => {
-        overlay.style.display = 'none';
-      };
-    }, 1000); // wait 1 sec
-
-    window.isThinking = false;
-    return; 
+  movesList.replaceChildren(fragment);
+  if (movesList.scrollHeight > movesList.clientHeight) {
+    movesList.scrollTop = movesList.scrollHeight;
   }
-
-  const moves = window.game.history({ verbose: true })
-    .map(m => m.from + m.to + (m.promotion || ''));
-
-  fetch('/move', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ 'moves[]': moves })
-  })
-    .then(async r => {
-      const text = await r.text();
-      console.log("Raw response from /move:", text);
-      return JSON.parse(text);
-    })
-    .then(data => {
-      if (data.bestmove) {
-        window.game.move({
-          from: data.bestmove.from,
-          to: data.bestmove.to,
-          promotion: data.bestmove.promotion || ''
-        });
-        requestAnimationFrame(() => {
-          window.board.position(window.game.fen());
-        });
-        updateStatus();
-
-        if (window.game.in_checkmate()) {
-          console.log("game over, displaying video");
-          const loser = window.game.turn(); 
-          const engineWon = (
-            (engineSide === 'white' && loser === 'b') ||
-            (engineSide === 'black' && loser === 'w') ||
-            (engineSide === 'both') 
-          );
-  
-          const engineLost = (
-            (engineSide === 'black' && loser === 'b') ||
-            (engineSide === 'white' && loser === 'w')
-          );
-    
-          if (engineWon) {
-            setTimeout(() => {
-              const overlay = document.getElementById('highlight-overlay');
-              const video = document.getElementById('highlight-video');
-              overlay.style.display = 'flex';
-              video.currentTime = 0;
-              video.muted = true;
-              video.play().then(() => {
-                console.log("video playing")
-              }).catch((err) => {
-                console.error("Autoplay failed:", err);
-              });
-  
-              setTimeout(() => {
-                overlay.style.display = 'none';
-              }, 10000);
-          
-              video.onended = () => {
-                overlay.style.display = 'none';
-              };
-            }, 1000); // wait 1 second
-          }
-  
-          else if (window.game.in_draw()) {
-            setTimeout(() => {
-              const overlay = document.getElementById('draw-overlay');
-              const video = document.getElementById('highlight-video');
-              overlay.style.display = 'flex';
-              video.currentTime = 0;
-              video.muted = true;
-              video.play().then(() => {
-                console.log("video playing")
-              }).catch((err) => {
-                console.error("Autoplay failed:", err);
-              });
-  
-              setTimeout(() => {
-                overlay.style.display = 'none';
-              }, 10000);
-          
-              video.onended = () => {
-                overlay.style.display = 'none';
-              };
-            }, 1000); // wait 1 second
-  
-          }
-          else if (engineLost) {
-            setTimeout(() => {
-              const overlay = document.getElementById('loser-overlay');
-              const video = document.getElementById('highlight-video');
-              overlay.style.display = 'flex';
-              video.currentTime = 0;
-              video.muted = true;
-              video.play().then(() => {
-                console.log("video playing")
-              }).catch((err) => {
-                console.error("Autoplay failed:", err);
-              });
-  
-              setTimeout(() => {
-                overlay.style.display = 'none';
-              }, 10000);
-          
-              video.onended = () => {
-                overlay.style.display = 'none';
-              };
-            }, 1000); // wait 1 second
-          }
-        }
-      }
-    })
-    .catch(err => {
-      console.error("Error in POST /move response:", err);
-    })
-    .finally(() => {
-      window.isThinking = false;
-    });
 }
-
-
-
-async function onDrop(source, target) {
-  if (window.isThinking) return 'snapback';
-  window.isThinking = true;
-
-  const piece = window.game.get(source)?.type;
-  const isPawn = (piece === 'p');
-  const targetRank = target.charAt(1);
-
-  if (isPawn && (targetRank === '8' || targetRank === '1')) {
-    // Try silent move
-    const legalMove = window.game.move({
-      from: source,
-      to: target,
-      promotion: 'q'
-    });
-
-    if (!legalMove) return 'snapback';
-
-    // Undo test move
-    window.game.undo();
-
-    // Show menu and wait
-    const promotionPiece = await showPromotionMenu(source, target);
-    return handleUserMove(source, target, promotionPiece);
-  }
-
-  return handleUserMove(source, target, '');
-}
-
-
-function showPromotionMenu(source, target) {
-  const modal = document.getElementById("promotion-modal");
-  if (!modal) return;
-
-  modal.style.display = "flex";
-
-  const color = window.game.turn() === 'w' ? 'w' : 'b';
-  modal.innerHTML = `
-    <img class="promo-icon" data-piece="q" src="chesspieces/pieces/${color}Q.png" />
-    <img class="promo-icon" data-piece="r" src="chesspieces/pieces/${color}R.png" />
-    <img class="promo-icon" data-piece="n" src="chesspieces/pieces/${color}N.png" />
-    <img class="promo-icon" data-piece="b" src="chesspieces/pieces/${color}B.png" />
-  `;
-
-  document.querySelectorAll(".promo-icon").forEach(img => {
-    img.onclick = () => {
-      const promotion = img.dataset.piece;
-      modal.style.display = 'none';
-      handleUserMove(source, target, promotion);
-    };
-  });
-}
-
-
-function setupPromotionClicks() {
-  document.querySelectorAll('.promo-piece').forEach(img => {
-    img.addEventListener('click', (e) => {
-      const piece = e.target.dataset.piece;
-      const menu = document.getElementById('promotion-menu');
-      menu.style.display = 'none';
-      if (window.resolvePromotion) window.resolvePromotion(piece);
-    });
-  });
-}
-
-
-function onSnapEnd() {
-  requestAnimationFrame(() => {
-    window.board.position(window.game.fen());
-  });
-}
-
-
-function resetGame() {
-  window.game.reset();
-
-  destroyBoard();
-  hardDOMCleanup();
-
-  window.board = Chessboard('board', {
-    draggable: true,
-    position: 'start',
-    pieceTheme: 'chesspieces/pieces/{piece}.png',
-    onDrop : onDrop,
-    onDragStart : onDragStart,
-    onSnapEnd : onSnapEnd,
-    pieceDragThreshold: 5
-  });
-  installIOSLongPressFix();
-
-  if (engineSide === 'black') {
-    window.board.orientation('white');
-  } else if (engineSide === 'white') {
-    window.board.orientation('black');
-  } else {
-    window.board.orientation('white');
-  }
-
-  window.board.position('start');
-
-  if (engineSide === 'white' || engineSide === 'both') {
-    makeEngineMoveIfNeeded();
-  }
-  window.isThinking = false;
-  updateStatus();
-}
-
 
 function updateStatus() {
-  let status = '';
-  let moveColor = (window.game.turn() === 'b') ? 'Black' : 'White';
+  const turnName = window.game.turn() === "b" ? "Black" : "White";
+  let status = turnName + " to move";
 
   if (window.game.in_checkmate()) {
-    status = 'Game over, ' + moveColor + ' is in checkmate.';
+    status = "Checkmate — " + turnName + " loses";
+  } else if (window.game.in_stalemate()) {
+    status = "Stalemate";
   } else if (window.game.in_draw()) {
-    status = 'Game over, drawn position';
-  } else {
-    status = moveColor + ' to move';
-    if (window.game.in_check()) {
-      status += ', ' + moveColor + ' is in check';
-    }
+    status = "Draw";
+  } else if (window.game.in_check()) {
+    status = turnName + " to move (check)";
   }
 
-  $status.html(status);
-  $fen.html(window.game.fen());
-  $pgn.html(window.game.pgn());
-
+  statusEl.textContent = status;
   renderMoves();
 }
 
-
-function destroyBoard() {
-  if (window.board) {
-    const boardElement = document.getElementById('board');
-    if (boardElement) {
-      boardElement.innerHTML = '';
+function setBoardPosition(fen, animate) {
+  return new Promise((resolve) => {
+    if (!window.board) {
+      resolve();
+      return;
     }
-    window.board = null;
+
+    const useAnimation = animate !== false && !prefersReducedMotion();
+    if (!useAnimation) {
+      if (pendingAnimationResolve) {
+        const previous = pendingAnimationResolve;
+        pendingAnimationResolve = null;
+        previous();
+      }
+      window.board.position(fen, false);
+      resolve();
+      return;
+    }
+
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (pendingAnimationResolve === finish) {
+        pendingAnimationResolve = null;
+      }
+      resolve();
+    };
+
+    if (pendingAnimationResolve) {
+      const previous = pendingAnimationResolve;
+      pendingAnimationResolve = null;
+      previous();
+    }
+
+    pendingAnimationResolve = finish;
+    window.board.position(fen, true);
+    window.setTimeout(finish, MOVE_ANIMATION_MS + 80);
+  });
+}
+
+function resolveGameOverState() {
+  if (window.game.in_checkmate()) {
+    const losingSide = window.game.turn() === "w" ? "White" : "Black";
+    const engineWon =
+      (engineSide === "white" && losingSide === "Black") ||
+      (engineSide === "black" && losingSide === "White");
+    return {
+      kind: engineWon ? "engine-win" : "human-win",
+      losingSide,
+    };
+  }
+
+  if (window.game.in_stalemate()) {
+    return { kind: "draw", message: "The game ended in stalemate." };
+  }
+
+  if (window.game.in_draw()) {
+    return { kind: "draw", message: "The game ended in a draw." };
+  }
+
+  return null;
+}
+
+function presentGameOver(result) {
+  if (!result) {
+    return false;
+  }
+
+  if (result.kind === "engine-win") {
+    scheduleMegatronWins();
+    return true;
+  }
+
+  if (result.kind === "human-win") {
+    showGameOver(
+      "You win",
+      result.losingSide + " is checkmated.",
+      "videos/lose.mp4"
+    );
+    return true;
+  }
+
+  showGameOver("Draw", result.message, "videos/lose.mp4");
+  return true;
+}
+
+function engineShouldMove() {
+  if (window.game.game_over()) {
+    return false;
+  }
+  const turn = window.game.turn();
+  return (
+    (engineSide === "white" && turn === "w") ||
+    (engineSide === "black" && turn === "b")
+  );
+}
+
+function continueAfterPlayerMove() {
+  updateStatus();
+  if (presentGameOver(resolveGameOverState())) {
+    return;
+  }
+  requestEngineMove();
+}
+
+function applyPlayerMove(source, target, promotionPiece) {
+  const moveOptions = {
+    from: source,
+    to: target,
+  };
+  if (promotionPiece) {
+    moveOptions.promotion = promotionPiece;
+  }
+
+  const moveResult = window.game.move(moveOptions);
+  if (!moveResult) {
+    return false;
+  }
+
+  clearSquareSelection();
+  return true;
+}
+
+async function requestEngineMove() {
+  if (window.isThinking || !engineShouldMove()) {
+    return;
+  }
+
+  const requestId = ++moveRequestId;
+  const requestedDepth = searchDepth;
+  const controller = new AbortController();
+  activeMoveController = controller;
+
+  setThinking(true);
+  showError("");
+
+  try {
+    const response = await fetch("/api/move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        moves: collectUciMoves(),
+        depth: requestedDepth,
+      }),
+      signal: controller.signal,
+    });
+
+    const data = await response.json();
+    if (requestId !== moveRequestId) {
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(data.error || "Engine request failed");
+    }
+
+    if (data.depth != null && Number(data.depth) !== requestedDepth) {
+      throw new Error(
+        "Server used depth " + data.depth + " instead of " + requestedDepth
+      );
+    }
+
+    if (!data.bestmove) {
+      updateStatus();
+      presentGameOver(resolveGameOverState());
+      return;
+    }
+
+    const moveOptions = {
+      from: data.bestmove.from,
+      to: data.bestmove.to,
+    };
+    if (data.bestmove.promotion) {
+      moveOptions.promotion = data.bestmove.promotion;
+    }
+
+    const played = window.game.move(moveOptions);
+    if (!played) {
+      throw new Error("Engine returned an illegal move");
+    }
+
+    await setBoardPosition(window.game.fen());
+    if (requestId !== moveRequestId) {
+      return;
+    }
+
+    updateStatus();
+    presentGameOver(resolveGameOverState());
+  } catch (error) {
+    if (requestId !== moveRequestId || error.name === "AbortError") {
+      return;
+    }
+    showError(error.message || "Failed to contact Megatron");
+  } finally {
+    if (activeMoveController === controller) {
+      activeMoveController = null;
+    }
+    if (requestId === moveRequestId) {
+      setThinking(false);
+    }
   }
 }
 
-
-document.addEventListener('DOMContentLoaded', () => {
-
-  console.log("TESTING: DOM fully loaded.");
-
-  if (window.game) {
-    delete window.game;
+function onDragStart(source, piece) {
+  clearSquareSelection();
+  if (window.game.game_over() || window.isThinking) {
+    return false;
   }
-  window.game = new Chess();
-  
-  destroyBoard();
-  hardDOMCleanup(); // for safari
+  if (
+    (window.game.turn() === "w" && piece.search(/^b/) !== -1) ||
+    (window.game.turn() === "b" && piece.search(/^w/) !== -1)
+  ) {
+    return false;
+  }
+  if (
+    (engineSide === "white" && window.game.turn() === "w") ||
+    (engineSide === "black" && window.game.turn() === "b")
+  ) {
+    return false;
+  }
+  return true;
+}
 
-  window.board = Chessboard('board', {
+function playerMaySelectSquare(square) {
+  const piece = window.game.get(square);
+  if (!piece || window.game.game_over() || window.isThinking) {
+    return false;
+  }
+  if (
+    (window.game.turn() === "w" && piece.color !== "w") ||
+    (window.game.turn() === "b" && piece.color !== "b")
+  ) {
+    return false;
+  }
+  if (
+    (engineSide === "white" && window.game.turn() === "w") ||
+    (engineSide === "black" && window.game.turn() === "b")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function choosePromotion(color) {
+  return new Promise((resolve) => {
+    pendingPromotion = resolve;
+    promotionModal.hidden = false;
+    promotionModal.replaceChildren();
+    ["q", "r", "n", "b"].forEach((piece) => {
+      const image = document.createElement("img");
+      image.className = "promo-icon";
+      image.dataset.piece = piece;
+      image.src = `chesspieces/pieces/${color}${piece.toUpperCase()}.png`;
+      image.alt = piece;
+      image.draggable = false;
+      image.onclick = () => {
+        promotionModal.hidden = true;
+        const finish = pendingPromotion;
+        pendingPromotion = null;
+        finish(piece);
+      };
+      promotionModal.appendChild(image);
+    });
+  });
+}
+
+function onDrop(source, target) {
+  ignoreBoardClickUntil = Date.now() + 250;
+  afterSnapHandler = null;
+
+  if (window.isThinking || window.game.game_over()) {
+    return "snapback";
+  }
+
+  if (!target || target === "offboard") {
+    return "snapback";
+  }
+
+  const piece = window.game.get(source);
+  if (!piece) {
+    return "snapback";
+  }
+
+  const targetRank = target.charAt(1);
+  const needsPromotion =
+    piece.type === "p" && (targetRank === "8" || targetRank === "1");
+
+  if (needsPromotion) {
+    const probeOptions = { from: source, to: target, promotion: "q" };
+    const probe = window.game.move(probeOptions);
+    if (!probe) {
+      return "snapback";
+    }
+    window.game.undo();
+    const color = piece.color === "w" ? "w" : "b";
+    window.setTimeout(() => {
+      choosePromotion(color).then((promotionPiece) => {
+        if (!applyPlayerMove(source, target, promotionPiece)) {
+          return;
+        }
+        window.board.position(window.game.fen(), !prefersReducedMotion());
+        continueAfterPlayerMove();
+      });
+    }, 0);
+    return "snapback";
+  }
+
+  if (!applyPlayerMove(source, target, null)) {
+    return "snapback";
+  }
+
+  afterSnapHandler = continueAfterPlayerMove;
+  return undefined;
+}
+
+function onSnapEnd() {
+  window.board.position(window.game.fen(), false);
+  const next = afterSnapHandler;
+  afterSnapHandler = null;
+  if (next) {
+    next();
+  }
+}
+
+function onMoveEnd() {
+  if (pendingAnimationResolve) {
+    const finish = pendingAnimationResolve;
+    pendingAnimationResolve = null;
+    finish();
+  }
+}
+
+function handleBoardTap(square) {
+  if (Date.now() < ignoreBoardClickUntil) {
+    return;
+  }
+  if (window.isThinking || window.game.game_over() || pendingPromotion) {
+    return;
+  }
+
+  if (!selectedSquare) {
+    if (!playerMaySelectSquare(square)) {
+      return;
+    }
+    selectedSquare = square;
+    const squareEl = boardEl.querySelector('[data-square="' + square + '"]');
+    if (squareEl) {
+      squareEl.classList.add("is-selected");
+    }
+    return;
+  }
+
+  if (selectedSquare === square) {
+    clearSquareSelection();
+    return;
+  }
+
+  const source = selectedSquare;
+  const piece = window.game.get(source);
+  clearSquareSelection();
+  if (!piece) {
+    return;
+  }
+
+  const targetRank = square.charAt(1);
+  const needsPromotion =
+    piece.type === "p" && (targetRank === "8" || targetRank === "1");
+
+  if (needsPromotion) {
+    const probe = window.game.move({
+      from: source,
+      to: square,
+      promotion: "q",
+    });
+    if (!probe) {
+      return;
+    }
+    window.game.undo();
+    choosePromotion(piece.color === "w" ? "w" : "b").then((promotionPiece) => {
+      if (!applyPlayerMove(source, square, promotionPiece)) {
+        return;
+      }
+      window.board.position(window.game.fen(), !prefersReducedMotion());
+      continueAfterPlayerMove();
+    });
+    return;
+  }
+
+  if (!applyPlayerMove(source, square, null)) {
+    return;
+  }
+
+  window.board.position(window.game.fen(), !prefersReducedMotion());
+  continueAfterPlayerMove();
+}
+
+function onBoardClick(event) {
+  const squareEl = event.target.closest("[data-square]");
+  if (!squareEl || !boardEl.contains(squareEl)) {
+    return;
+  }
+  handleBoardTap(squareEl.getAttribute("data-square"));
+}
+
+function fitBoardContainer() {
+  if (!window.board) {
+    return;
+  }
+  boardEl.style.width = "";
+  window.board.resize();
+  const innerBoard = boardEl.querySelector(".board-b72b1");
+  if (!innerBoard) {
+    return;
+  }
+  boardEl.style.width = innerBoard.getBoundingClientRect().width + "px";
+}
+
+function createBoard() {
+  window.board = Chessboard("board", {
     draggable: true,
-    position: 'start',
-    pieceTheme: 'chesspieces/pieces/{piece}.png',
-    onDrop : onDrop,
-    onDragStart : onDragStart,
-    onSnapEnd : onSnapEnd,
-    pieceDragThreshold: 5
+    position: "start",
+    orientation: currentOrientation(),
+    pieceTheme: "chesspieces/pieces/{piece}.png",
+    moveSpeed: MOVE_ANIMATION_MS,
+    snapbackSpeed: 60,
+    snapSpeed: 40,
+    appearSpeed: MOVE_ANIMATION_MS,
+    trashSpeed: 60,
+    onDrop,
+    onDragStart,
+    onSnapEnd,
+    onMoveEnd,
   });
-  installIOSLongPressFix();
+  fitBoardContainer();
+}
 
-  window.board.orientation('white');
+function resetGame() {
+  cancelActiveMoveRequest();
+  cancelCelebration();
+  clearSquareSelection();
+  afterSnapHandler = null;
+  hideAllOverlays();
+  showError("");
+  setThinking(false);
+  window.game = new Chess();
+
+  if (window.board) {
+    window.board.orientation(currentOrientation());
+    window.board.position("start", false);
+    fitBoardContainer();
+  } else {
+    createBoard();
+  }
+
   updateStatus();
+  if (engineShouldMove()) {
+    requestEngineMove();
+  }
+}
 
-  document.getElementById('sideSelect')
-      .addEventListener('change', (e) => {
-          engineSide = e.target.value; 
-          resetGame();
-  });
-
-    console.log("Board created:", window.board);
+sideSelect.addEventListener("change", (event) => {
+  engineSide = event.target.value;
+  resetGame();
 });
 
+depthSlider.addEventListener("input", (event) => {
+  syncDepthDisplay(event.target.value);
+});
 
-// Disallow png image sheet being shown on IOS
-function installIOSLongPressFix() {
-  const boardEl = document.getElementById('board');
-  if (!boardEl) return;
-
-  const cancelIfPiece = (e) => {
-    const t = e.target;
-    if (!t) return;
-    if (t.tagName === 'IMG' || t.classList.contains('piece-417db')) {
-      e.preventDefault();  
-    }
-  };
-
-  boardEl.addEventListener('touchstart',  cancelIfPiece, { passive: false, capture: true });
-  boardEl.addEventListener('touchend',    cancelIfPiece, { passive: false, capture: true });
-  boardEl.addEventListener('touchcancel', cancelIfPiece, { passive: false, capture: true });
-
-  boardEl.addEventListener('dragstart', (e) => e.preventDefault(), true);
+function getAboutFocusable() {
+  return aboutCard.querySelectorAll(
+    'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  );
 }
+
+function openAboutModal() {
+  if (aboutOpen) {
+    return;
+  }
+  aboutOpen = true;
+  aboutLastFocus = document.activeElement;
+  aboutModal.hidden = false;
+  document.body.classList.add("about-open");
+  aboutButton.setAttribute("aria-expanded", "true");
+  window.setTimeout(() => {
+    aboutClose.focus();
+  }, 0);
+}
+
+function closeAboutModal() {
+  if (!aboutOpen) {
+    return;
+  }
+  aboutOpen = false;
+  aboutModal.hidden = true;
+  document.body.classList.remove("about-open");
+  aboutButton.setAttribute("aria-expanded", "false");
+  if (aboutLastFocus && typeof aboutLastFocus.focus === "function") {
+    aboutLastFocus.focus();
+  } else {
+    aboutButton.focus();
+  }
+}
+
+function onAboutKeyDown(event) {
+  if (!aboutOpen) {
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeAboutModal();
+    return;
+  }
+
+  if (event.key !== "Tab") {
+    return;
+  }
+
+  const focusable = Array.from(getAboutFocusable());
+  if (focusable.length === 0) {
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+resetButton.addEventListener("click", resetGame);
+gameOverReset.addEventListener("click", resetGame);
+dismissWins.addEventListener("click", hideMegatronWins);
+winsPlayAgain.addEventListener("click", resetGame);
+boardEl.addEventListener("click", onBoardClick);
+aboutButton.addEventListener("click", openAboutModal);
+aboutClose.addEventListener("click", closeAboutModal);
+aboutModal.addEventListener("click", (event) => {
+  if (event.target && event.target.getAttribute("data-about-close") === "true") {
+    closeAboutModal();
+  }
+});
+document.addEventListener("keydown", onAboutKeyDown);
+
+window.addEventListener("resize", () => {
+  fitBoardContainer();
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  engineSide = sideSelect.value;
+  syncDepthDisplay(depthSlider.value || DEFAULT_DEPTH);
+  aboutButton.setAttribute("aria-expanded", "false");
+  window.game = new Chess();
+  createBoard();
+  updateStatus();
+});
