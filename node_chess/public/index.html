@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <title>Megatron Chess</title>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="chess.min.js"></script>
@@ -28,16 +31,37 @@
         <p class="eyebrow">C++ Chess Engine</p>
         <h1>Megatron</h1>
         <p class="tagline">
-          Play against a UCI chess engine built by Adam Valade.
+          UCI compatible chess engine built by Adam Valade, CS student @
+          University of Michigan.
         </p>
+        <button
+          type="button"
+          id="aboutButton"
+          class="about-button"
+          aria-haspopup="dialog"
+          aria-controls="about-modal"
+        >
+          <span class="about-icon" aria-hidden="true">ⓘ</span>
+          About Megatron
+        </button>
       </header>
 
       <main class="layout">
         <section class="board-panel">
           <div id="board"></div>
           <div id="status" class="status">White to move</div>
-          <div id="thinking" class="thinking" hidden>Megatron is thinking…</div>
-          <div id="error" class="error" hidden></div>
+          <div class="board-feedback">
+            <div
+              id="thinking"
+              class="thinking"
+              aria-live="polite"
+              aria-hidden="true"
+            >
+              Megatron is thinking at depth
+              <span id="thinkingDepth">4</span>…
+            </div>
+            <div id="error" class="error" aria-hidden="true"></div>
+          </div>
         </section>
 
         <aside class="side-panel">
@@ -50,16 +74,34 @@
                 <option value="white">White</option>
               </select>
             </label>
-            <label class="field">
-              <span>Difficulty (search depth)</span>
-              <select id="depthSelect">
-                <option value="2">2 — Fast</option>
-                <option value="3">3 — Easy</option>
-                <option value="4" selected>4 — Standard</option>
-                <option value="5">5 — Stronger</option>
-                <option value="6">6 — Slow</option>
-              </select>
-            </label>
+            <div class="field depth-field">
+              <div class="depth-heading">
+                <span>Search Depth:</span>
+                <strong id="depthValue">4</strong>
+                <span id="depthRecommended" class="depth-recommended"
+                  >(Recommended)</span
+                >
+              </div>
+              <input
+                id="depthSlider"
+                type="range"
+                min="1"
+                max="8"
+                value="4"
+                step="1"
+                aria-valuemin="1"
+                aria-valuemax="8"
+                aria-valuenow="4"
+                aria-label="Search depth"
+              />
+              <div class="depth-scale" aria-hidden="true">
+                <span>Easy</span>
+                <span>Expert</span>
+              </div>
+              <p class="depth-hint">
+                Higher depths make Megatron stronger and slower.
+              </p>
+            </div>
             <button id="resetButton" type="button">New Game</button>
           </div>
 
@@ -71,15 +113,103 @@
       </main>
     </div>
 
+    <div id="megatron-wins" class="megatron-wins" hidden>
+      <div class="megatron-wins-panel">
+        <h2 id="megatron-wins-text" class="megatron-wins-text">MEGATRON WINS</h2>
+        <video
+          id="win-highlight-video"
+          class="highlight-video"
+          muted
+          playsinline
+        ></video>
+        <div class="megatron-wins-actions">
+          <button id="dismissWins" type="button">Continue</button>
+          <button id="winsPlayAgain" type="button" class="button-secondary">
+            Play Again
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div id="game-over" class="game-over" hidden>
       <div class="game-over-card">
         <h2 id="game-over-title">Game Over</h2>
         <p id="game-over-message"></p>
+        <video
+          id="result-highlight-video"
+          class="highlight-video"
+          muted
+          playsinline
+        ></video>
         <button id="gameOverReset" type="button">Play Again</button>
       </div>
     </div>
 
     <div id="promotion-modal" class="promotion-menu" hidden></div>
+
+    <div
+      id="about-modal"
+      class="about-modal"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="about-title"
+    >
+      <div class="about-modal-backdrop" data-about-close="true"></div>
+      <div class="about-modal-card">
+        <div class="about-modal-header">
+          <h2 id="about-title">About Megatron</h2>
+          <button
+            type="button"
+            id="aboutClose"
+            class="about-close"
+            aria-label="Close About Megatron"
+          >
+            ×
+          </button>
+        </div>
+        <div class="about-modal-body">
+          <p>
+            Megatron is a chess engine built from scratch in C++, featuring
+            custom move generation, position evaluation, and optimized
+            game-tree search.
+          </p>
+          <p>
+            Its search algorithm combines alpha-beta pruning, quiescence
+            search, and intelligent move ordering to evaluate chess positions
+            efficiently. Zobrist hashing and transposition tables further
+            improve performance by caching previously searched positions.
+          </p>
+          <p>
+            Built with support for the Universal Chess Interface (UCI),
+            Megatron can run independently in compatible chess applications or
+            power this interactive web experience.
+          </p>
+          <dl class="about-meta">
+            <div class="about-meta-row">
+              <dt>Tech Stack</dt>
+              <dd>C++, JavaScript, Node.js</dd>
+            </div>
+            <div class="about-meta-row">
+              <dt>Key Algorithms</dt>
+              <dd>
+                Negamax, Alpha-Beta Pruning, Quiescence Search, Zobrist
+                Hashing, Transposition Tables
+              </dd>
+            </div>
+          </dl>
+          <a
+            class="about-github"
+            href="https://github.com/Adamvalade/megatron-chess"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            View Source on GitHub
+          </a>
+        </div>
+      </div>
+    </div>
+
     <script src="app.js"></script>
   </body>
 </html>

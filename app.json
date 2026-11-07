@@ -1,0 +1,34 @@
+{
+  "name": "megatron-chess",
+  "description": "Megatron Chess web app with C++ UCI engine",
+  "repository": "https://github.com/Adamvalade/megatron-chess",
+  "stack": "heroku-24",
+  "buildpacks": [
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-apt"
+    },
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
+  "env": {
+    "ENGINE_PATH": {
+      "description": "Path to the compiled Megatron binary",
+      "value": "engine"
+    },
+    "ENGINE_DEPTH": {
+      "value": "4"
+    },
+    "ENGINE_MAX_DEPTH": {
+      "value": "8"
+    },
+    "NODE_ENV": {
+      "value": "production"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1
+    }
+  }
+}
