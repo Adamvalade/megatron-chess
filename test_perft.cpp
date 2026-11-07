@@ -752,29 +752,6 @@ int material_white_perspective(const Board &board) {
     return score;
 }
 
-int pst_white_perspective(const Board &board) {
-    const int (*tables[6])[8] = {PAWN_MIDGAME, PST_KNIGHT, PST_BISHOPS,
-                                 PST_ROOK,     PST_QUEEN,  KING_MIDGAME};
-    int score = 0;
-    for (Color color : {Color::WHITE, Color::BLACK}) {
-        const int sign = (color == Color::WHITE) ? 1 : -1;
-        for (size_t type = 0; type < 6; ++type) {
-            uint64_t pieces = board.get_bitboard(static_cast<PieceType>(type),
-                                                 color);
-            while (pieces) {
-                const int square = __builtin_ctzll(pieces);
-                pieces &= pieces - 1;
-                const int rank = square / 8;
-                const int file = square % 8;
-                const int row =
-                    (color == Color::WHITE) ? (7 - rank) : rank;
-                score += sign * (tables[type][row][file] / 10);
-            }
-        }
-    }
-    return score;
-}
-
 void test_eval_material_dominates_pst() {
     Board before;
     before.set_from_fen("r3k3/8/8/3N4/8/8/8/4K3 w - - 0 1");
@@ -782,14 +759,109 @@ void test_eval_material_dominates_pst() {
     after_fork_win.set_from_fen("N3k3/8/8/8/8/8/8/4K3 w - - 0 1");
     const int material_gain = material_white_perspective(after_fork_win) -
                               material_white_perspective(before);
-    const int pst_delta = pst_white_perspective(after_fork_win) -
-                          pst_white_perspective(before);
+    const int eval_gain =
+        evaluate_board(after_fork_win) - evaluate_board(before);
     unit_check(material_gain == 500,
                "eval balance: capturing rook via fork gains 500 material");
-    unit_check(material_gain + pst_delta > 200,
-               "eval balance: material gain still dominates PST after scale");
+    unit_check(eval_gain > 200,
+               "eval balance: material gain still dominates positional terms");
     unit_check(evaluate_board(after_fork_win) > 200,
                "eval balance: up-a-rook end state stays clearly positive");
+
+    Board queen_win;
+    queen_win.set_from_fen("4k3/8/8/3q4/8/2N5/8/4K3 w - - 0 1");
+    Board after_queen;
+    after_queen.set_from_fen("4k3/8/8/3N4/8/8/8/4K3 w - - 0 1");
+    unit_check(evaluate_board(after_queen) - evaluate_board(queen_win) > 500,
+               "eval balance: winning a free queen stays dominant");
+}
+
+void test_positional_evaluation() {
+    {
+        Board castled;
+        castled.set_from_fen(
+            "r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - "
+            "0 8");
+        Board exposed;
+        exposed.set_from_fen(
+            "r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQK2R w KQ - "
+            "0 8");
+        unit_check(evaluate_board(castled) > evaluate_board(exposed),
+                   "positional: castled king preferred over uncastled");
+    }
+    {
+        Board shelter;
+        shelter.set_from_fen(
+            "3q2k1/5ppp/8/8/8/8/5PPP/3Q2K1 w - - 0 1");
+        Board broken;
+        broken.set_from_fen(
+            "3q2k1/5ppp/8/8/8/8/PPP5/3Q2K1 w - - 0 1");
+        unit_check(evaluate_board(shelter) > evaluate_board(broken),
+                   "positional: intact pawn shelter preferred");
+    }
+    {
+        Board rights;
+        rights.set_from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+        Board walked;
+        walked.set_from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPPKPPP/RNBQ1BNR w kq - 0 3");
+        unit_check(evaluate_board(rights) > evaluate_board(walked),
+                   "positional: early king walk is discouraged");
+    }
+    {
+        Board mid_corner;
+        mid_corner.set_from_fen(
+            "rnbq1rk1/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQ1RK1 w - - 0 6");
+        const int mid_phase = get_game_phase_int(mid_corner);
+        Board end_active;
+        end_active.set_from_fen("4k3/8/8/3K4/8/8/8/8 w - - 0 1");
+        Board end_corner;
+        end_corner.set_from_fen("4k3/8/8/8/8/8/8/K7 w - - 0 1");
+        unit_check(mid_phase > 12,
+                   "positional: middlegame still has high phase");
+        unit_check(evaluate_board(end_active) > evaluate_board(end_corner),
+                   "positional: active king preferred in endgame");
+        unit_check(get_game_phase_int(end_active) == 0,
+                   "positional: bare kings are endgame phase 0");
+    }
+    {
+        Board developed;
+        developed.set_from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3");
+        Board undeveloped;
+        undeveloped.set_from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+        unit_check(evaluate_board(developed) > evaluate_board(undeveloped),
+                   "positional: developing knights is credited");
+    }
+    {
+        Board equal_open;
+        equal_open.set_from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+        Board up_exchange;
+        up_exchange.set_from_fen(
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBN1 w Qkq - 0 2");
+        unit_check(evaluate_board(equal_open) - evaluate_board(up_exchange) >
+                       300,
+                   "positional: missing a rook dominates opening bonuses");
+    }
+    {
+        Board with_queen;
+        with_queen.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/3Q2K1 w - - 0 1");
+        Board no_queen;
+        no_queen.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1");
+        Board exposed_queen;
+        exposed_queen.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/3Q1K2 w - - 0 1");
+        Board exposed_quiet;
+        exposed_quiet.set_from_fen("6k1/5ppp/8/8/8/8/5PPP/5K2 w - - 0 1");
+        const int queen_gap =
+            evaluate_board(with_queen) - evaluate_board(exposed_queen);
+        const int quiet_gap =
+            evaluate_board(no_queen) - evaluate_board(exposed_quiet);
+        unit_check(queen_gap > quiet_gap,
+                   "positional: king exposure matters more with queens");
+    }
 }
 
 struct TacticCase {
@@ -1272,6 +1344,7 @@ int run_unit_tests() {
     test_quiescence();
     test_alpha_beta_matches_reference();
     test_eval_material_dominates_pst();
+    test_positional_evaluation();
     test_tactics();
     test_zobrist_and_tt();
     cout << "Unit tests: " << (unit_failures == 0 ? "all passed" : "FAILURES")
